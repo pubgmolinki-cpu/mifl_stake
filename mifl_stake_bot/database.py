@@ -5,29 +5,68 @@ from config import DATABASE_URL
 pool = None
 
 
+# =========================
+# CONNECT DATABASE
+# =========================
+
 async def connect_db():
 
     global pool
 
     pool = await asyncpg.create_pool(
-        DATABASE_URL
+        DATABASE_URL,
+        min_size=1,
+        max_size=10
     )
 
+
+# =========================
+# INIT DATABASE
+# =========================
 
 async def init_db():
 
     async with pool.acquire() as conn:
 
+        # =========================
+        # DROP OLD TABLES (MVP)
+        # =========================
+
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            telegram_id BIGINT UNIQUE,
-            balance INTEGER DEFAULT 1000
-        )
+        DROP TABLE IF EXISTS bets CASCADE
         """)
 
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS matches (
+        DROP TABLE IF EXISTS matches CASCADE
+        """)
+
+        await conn.execute("""
+        DROP TABLE IF EXISTS users CASCADE
+        """)
+
+        # =========================
+        # USERS
+        # =========================
+
+        await conn.execute("""
+        CREATE TABLE users (
+
+            id SERIAL PRIMARY KEY,
+
+            telegram_id BIGINT UNIQUE,
+
+            balance INTEGER DEFAULT 1000
+
+        )
+        """)
+
+        # =========================
+        # MATCHES
+        # =========================
+
+        await conn.execute("""
+        CREATE TABLE matches (
+
             id SERIAL PRIMARY KEY,
 
             home_team TEXT,
@@ -53,34 +92,51 @@ async def init_db():
 
             home_score INTEGER,
             away_score INTEGER
+
         )
         """)
 
+        # =========================
+        # BETS
+        # =========================
+
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS bets (
+        CREATE TABLE bets (
+
             id SERIAL PRIMARY KEY,
 
             user_id BIGINT,
+
             match_id INTEGER,
 
             bet_type TEXT,
+
             prediction TEXT,
 
             amount INTEGER,
+
             odds REAL,
 
             status TEXT DEFAULT 'pending'
+
         )
         """)
 
+        print("✅ Таблицы успешно созданы")
+
+
+# =========================
+# USERS
+# =========================
 
 async def create_user(telegram_id):
 
     async with pool.acquire() as conn:
 
         user = await conn.fetchrow("""
-        SELECT * FROM users
-        WHERE telegram_id=$1
+        SELECT *
+        FROM users
+        WHERE telegram_id = $1
         """, telegram_id)
 
         if not user:
@@ -96,8 +152,9 @@ async def get_user(telegram_id):
     async with pool.acquire() as conn:
 
         return await conn.fetchrow("""
-        SELECT * FROM users
-        WHERE telegram_id=$1
+        SELECT *
+        FROM users
+        WHERE telegram_id = $1
         """, telegram_id)
 
 
@@ -112,21 +169,18 @@ async def update_balance(
         UPDATE users
         SET balance = balance + $1
         WHERE telegram_id = $2
-        """, amount, telegram_id)
+        """,
+        amount,
+        telegram_id
+        )
 
 
-async def get_matches():
-
-    async with pool.acquire() as conn:
-
-        return await conn.fetch("""
-        SELECT *
-        FROM matches
-        WHERE status='upcoming'
-        """)
-
+# =========================
+# MATCHES
+# =========================
 
 async def create_match(
+
     home_team,
     away_team,
 
@@ -151,6 +205,7 @@ async def create_match(
 
         await conn.execute("""
         INSERT INTO matches (
+
             home_team,
             away_team,
 
@@ -169,15 +224,18 @@ async def create_match(
 
             odds_btts_yes,
             odds_btts_no
+
         )
 
         VALUES (
-            $1,$2,
-            $3,$4,
-            $5,$6,
-            $7,$8,$9,
-            $10,$11,
-            $12,$13
+
+            $1, $2,
+            $3, $4,
+            $5, $6,
+            $7, $8, $9,
+            $10, $11,
+            $12, $13
+
         )
         """,
 
@@ -202,39 +260,15 @@ async def create_match(
         )
 
 
-async def create_bet(
-    user_id,
-    match_id,
-    bet_type,
-    prediction,
-    amount,
-    odds
-):
+async def get_matches():
 
     async with pool.acquire() as conn:
 
-        await conn.execute("""
-        INSERT INTO bets (
-            user_id,
-            match_id,
-            bet_type,
-            prediction,
-            amount,
-            odds
-        )
-
-        VALUES (
-            $1,$2,$3,$4,$5,$6
-        )
-        """,
-
-        user_id,
-        match_id,
-        bet_type,
-        prediction,
-        amount,
-        odds
-        )
+        return await conn.fetch("""
+        SELECT *
+        FROM matches
+        WHERE status = 'upcoming'
+        """)
 
 
 async def get_match(match_id):
@@ -244,5 +278,78 @@ async def get_match(match_id):
         return await conn.fetchrow("""
         SELECT *
         FROM matches
-        WHERE id=$1
+        WHERE id = $1
         """, match_id)
+
+
+# =========================
+# BETS
+# =========================
+
+async def create_bet(
+
+    user_id,
+    match_id,
+
+    bet_type,
+
+    prediction,
+
+    amount,
+    odds
+):
+
+    async with pool.acquire() as conn:
+
+        await conn.execute("""
+        INSERT INTO bets (
+
+            user_id,
+            match_id,
+
+            bet_type,
+
+            prediction,
+
+            amount,
+            odds
+
+        )
+
+        VALUES (
+
+            $1,
+            $2,
+
+            $3,
+
+            $4,
+
+            $5,
+            $6
+
+        )
+        """,
+
+        user_id,
+        match_id,
+
+        bet_type,
+
+        prediction,
+
+        amount,
+        odds
+        )
+
+
+async def get_user_bets(user_id):
+
+    async with pool.acquire() as conn:
+
+        return await conn.fetch("""
+        SELECT *
+        FROM bets
+        WHERE user_id = $1
+        ORDER BY id DESC
+        """, user_id)
