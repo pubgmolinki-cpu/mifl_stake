@@ -1,3 +1,4 @@
-aiogram>=3.4.0
-asyncpg>=0.29.0
-python-dotenv>=1.0.0
+aiogram
+asyncpg
+python-dotenv
+flask
