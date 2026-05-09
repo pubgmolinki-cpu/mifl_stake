@@ -1,26 +1,29 @@
 import asyncio
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram import (
+    Bot,
+    Dispatcher,
+    F
+)
+
+from aiogram.types import (
+    Message,
+    CallbackQuery
+)
+
+from aiogram.fsm.context import FSMContext
 
 from config import BOT_TOKEN
 
-from database import (
-    connect_db,
-    init_db,
-
-    create_user,
-    get_user,
-
-    create_match,
-    get_matches
-)
+from database import *
 
 from keyboards import main_keyboard
 
 from odds_engine import calculate_odds
 
-from ai_analysis import generate_analysis
+from betting import betting_keyboard
+
+from states import BetState
 
 bot = Bot(token=BOT_TOKEN)
 
@@ -44,7 +47,7 @@ async def profile(message: Message):
     user = await get_user(message.from_user.id)
 
     await message.answer(f"""
-👤 Ваш профиль
+👤 Профиль
 
 💰 Баланс: {user['balance']}
 """)
@@ -59,36 +62,116 @@ async def matches(message: Message):
         await message.answer("Матчей пока нет.")
         return
 
-    text = "⚽ Матчи MIFL\n"
-
     for match in matches:
 
-        text += f"""
-
+        text = f"""
 🏟️ {match['home_team']} vs {match['away_team']}
 
 П1 — {match['odds_home']}
 X — {match['odds_draw']}
 П2 — {match['odds_away']}
 
+ТБ 2.5 — {match['odds_over25']}
+ТМ 2.5 — {match['odds_under25']}
+
+ОЗ Да — {match['odds_btts_yes']}
+ОЗ Нет — {match['odds_btts_no']}
 """
 
-        analysis = generate_analysis(
-            match['home_team'],
-            match['away_team'],
-            match['home_rating'],
-            match['away_rating'],
-            match['home_form'],
-            match['away_form']
+        await message.answer(
+            text,
+            reply_markup=betting_keyboard(match['id'])
         )
 
-        text += analysis
-        text += "\n━━━━━━━━━━━━\n"
 
-    await message.answer(text)
+@dp.callback_query(F.data.startswith("bet"))
+async def bet_handler(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    _, match_id, prediction = callback.data.split(":")
+
+    await state.update_data(
+        match_id=int(match_id),
+        prediction=prediction
+    )
+
+    await callback.message.answer(
+        "Введите сумму ставки:"
+    )
+
+    await state.set_state(
+        BetState.waiting_for_amount
+    )
 
 
-async def seed_matches():
+@dp.message(BetState.waiting_for_amount)
+async def process_bet(
+    message: Message,
+    state: FSMContext
+):
+
+    amount = int(message.text)
+
+    user = await get_user(
+        message.from_user.id
+    )
+
+    if user['balance'] < amount:
+
+        await message.answer(
+            "Недостаточно средств."
+        )
+
+        return
+
+    data = await state.get_data()
+
+    match = await get_match(
+        data['match_id']
+    )
+
+    prediction = data['prediction']
+
+    odds_map = {
+        "П1": match['odds_home'],
+        "X": match['odds_draw'],
+        "П2": match['odds_away'],
+        "OVER": match['odds_over25'],
+        "UNDER": match['odds_under25'],
+        "BTTS_YES": match['odds_btts_yes'],
+        "BTTS_NO": match['odds_btts_no']
+    }
+
+    odds = odds_map[prediction]
+
+    await update_balance(
+        message.from_user.id,
+        -amount
+    )
+
+    await create_bet(
+        user_id=message.from_user.id,
+        match_id=data['match_id'],
+        bet_type="single",
+        prediction=prediction,
+        amount=amount,
+        odds=odds
+    )
+
+    await message.answer(f"""
+✅ Ставка принята
+
+💰 Сумма: {amount}
+📈 Коэффициент: {odds}
+🎯 Исход: {prediction}
+""")
+
+    await state.clear()
+
+
+async def seed_match():
 
     matches = await get_matches()
 
@@ -96,25 +179,31 @@ async def seed_matches():
         return
 
     odds = calculate_odds(
-        home_rating=85,
-        away_rating=78,
-        home_form=8,
-        away_form=5
+        85,
+        79,
+        8,
+        5
     )
 
     await create_match(
-        home_team="Phoenix",
-        away_team="Titans",
+        "Phoenix",
+        "Titans",
 
-        home_rating=85,
-        away_rating=78,
+        85,
+        79,
 
-        home_form=8,
-        away_form=5,
+        8,
+        5,
 
-        odds_home=odds["home"],
-        odds_draw=odds["draw"],
-        odds_away=odds["away"]
+        odds["home"],
+        odds["draw"],
+        odds["away"],
+
+        odds["over25"],
+        odds["under25"],
+
+        odds["btts_yes"],
+        odds["btts_no"]
     )
 
 
@@ -124,7 +213,7 @@ async def main():
 
     await init_db()
 
-    await seed_matches()
+    await seed_match()
 
     print("MIFL BET started")
 
