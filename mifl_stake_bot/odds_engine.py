@@ -15,10 +15,10 @@ def calculate_odds(
         away_form * 0.3
     )
 
-    total_strength = home_strength + away_strength
+    total = home_strength + away_strength
 
-    home_probability = home_strength / total_strength
-    away_probability = away_strength / total_strength
+    home_probability = home_strength / total
+    away_probability = away_strength / total
 
     draw_probability = 0.22
 
@@ -29,8 +29,20 @@ def calculate_odds(
     odds_draw = round(1 / draw_probability, 2)
     odds_away = round(1 / away_probability, 2)
 
+    over25 = 1.85
+    under25 = 1.95
+
+    btts_yes = 1.75
+    btts_no = 2.05
+
     return {
         "home": odds_home,
         "draw": odds_draw,
-        "away": odds_away
+        "away": odds_away,
+
+        "over25": over25,
+        "under25": under25,
+
+        "btts_yes": btts_yes,
+        "btts_no": btts_no
     }
