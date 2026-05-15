@@ -11,4 +11,4 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-ADMIN_IDS = [123456789, 987654321]  # Замени на свой Telegram ID
+ADMIN_IDS = [1866813859]  # Замени на свой Telegram ID
