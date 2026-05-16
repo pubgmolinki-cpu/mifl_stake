@@ -3,17 +3,19 @@ import logging
 import sys
 from aiohttp import web
 from aiogram import Bot, Dispatcher
-from aiogram.webhook.aiohttp_handler import SimpleRequestHandler, setup_application
+
+# Вот ТУТ исправлен импорт: вместо aiohttp_handler теперь правильный aiohttp_server
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 import config
 from database import db
 
-# Импортируем роутеры напрямую из файлов, чтобы избежать любых проблем с __init__.py
+# Напрямую импортируем роутеры твоих модулей
 from handlers.user import router as user_router
 from handlers.bets import router as bets_router
 from handlers.admin import router as admin_router
 
-# Настраиваем вывод логов прямо в стандартный поток Render
+# Логирование для вывода в консоль Render
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
@@ -33,23 +35,23 @@ def main():
     try:
         logger.info("🔎 Проверка переменных окружения в Render...")
         if not config.BOT_TOKEN:
-            raise ValueError("❌ Ошибка: Переменная 'BOT_TOKEN' пустая или не найдена в Environment на Render!")
+            raise ValueError("❌ Ошибка: Переменная 'BOT_TOKEN' пустая или отсутствует!")
         if not config.DATABASE_URL:
-            raise ValueError("❌ Ошибка: Переменная 'DATABASE_URL' пустая или не найдена в Environment на Render!")
+            raise ValueError("❌ Ошибка: Переменная 'DATABASE_URL' пустая или отсутствует!")
         if not config.WEBHOOK_HOST:
-            raise ValueError("❌ Ошибка: Переменная 'WEBHOOK_HOST' пустая или не найдена в Environment на Render!")
+            raise ValueError("❌ Ошибка: Переменная 'WEBHOOK_HOST' пустая или отсутствует!")
 
         logger.info("🤖 Инициализация компонентов aiogram...")
         bot = Bot(token=config.BOT_TOKEN)
         dp = Dispatcher()
 
-        # Подключаем прямые роутеры
+        # Регистрация обработчиков
         dp.include_routers(admin_router, user_router, bets_router)
 
-        # Регистрируем старт
+        # Привязываем метод старта
         dp.startup.register(on_startup)
 
-        # Создаем веб-сервер
+        # Конфигурация вебхук-сервера на aiohttp
         app = web.Application()
         webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_requests_handler.register(app, path=config.WEBHOOK_PATH)
