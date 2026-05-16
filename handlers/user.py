@@ -47,7 +47,7 @@ async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
     await state.update_data(match_id=m_id)
     
     async with db.pool.acquire() as conn:
-        match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", m_id)
+        match_data = await conn.fetchrow("SELECT id, title, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", m_id)
         
     if not match_data:
         return await callback.answer("❌ Матч не найден.", show_alert=True)
@@ -89,7 +89,7 @@ async def select_bet_outcome(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # =====================================================================
-# 2. ФИКС ОДИНОЧНОЙ СТАВКИ (ВОЗВРАТ К СТАРОМУ ФОРМАТУ БД)
+# 2. РАДИКАЛЬНЫЙ ФИКС СТАВКИ (НОВАЯ ЧИСТАЯ ТАБЛИЦА)
 # =====================================================================
 
 @router.message(BetStates.waiting_for_amount)
@@ -98,7 +98,7 @@ async def accept_bet_amount(message: Message, state: FSMContext):
         await message.answer("❌ Пожалуйста, введите сумму ставки цифрами.")
         return
 
-    bet_amount = int(message.text)
+    bet_amount = float(message.text)
     user_id = message.from_user.id
     
     state_data = await state.get_data()
@@ -116,7 +116,7 @@ async def accept_bet_amount(message: Message, state: FSMContext):
             if balance < bet_amount:
                 return await message.answer("❌ Недостаточно средств на игровом балансе!")
 
-            match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", int(match_id))
+            match_data = await conn.fetchrow("SELECT id, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", int(match_id))
             if not match_data:
                 return await message.answer("❌ Матч больше не существует.")
 
@@ -128,23 +128,35 @@ async def accept_bet_amount(message: Message, state: FSMContext):
             
             coef = round(float(match_dict.get(col_name) or 2.0), 1)
 
-            # Строгое сохранение как в первой версии (match_id - число, outcome - строка)
+            # Создаем новую таблицу, чтобы обойти ошибки старой
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS single_bets (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    match_id BIGINT,
+                    outcome TEXT,
+                    amount NUMERIC,
+                    coef NUMERIC,
+                    status TEXT
+                )
+            ''')
+
             await conn.execute(
-                "INSERT INTO bets (user_id, match_id, outcome, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
-                user_id, int(match_id), str(bet_type), bet_amount, float(coef)
+                "INSERT INTO single_bets (user_id, match_id, outcome, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+                user_id, int(match_id), str(bet_type), float(bet_amount), float(coef)
             )
-            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", bet_amount, user_id)
+            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", float(bet_amount), user_id)
             
-        await message.answer(f"✅ Ставка успешно принята!\n🎰 Сумма: {bet_amount} ⭐ | Кэф: {coef}")
+        await message.answer(f"✅ Ставка успешно принята!\n🎰 Сумма: {bet_amount} | Кэф: {coef}")
         await state.clear()
 
     except Exception as e:
         print(f"Ошибка одиночной ставки: {e}")
-        await message.answer("❌ Произошла ошибка при оформлении ставки. Проверьте базу данных.")
+        await message.answer(f"❌ Ошибка БД: {e}")
         await state.clear()
 
 # =====================================================================
-# 3. ФИКС ЭКСПРЕССА (АВТОСОЗДАНИЕ ПРАВИЛЬНОЙ ТАБЛИЦЫ)
+# 3. ЭКСПРЕССЫ
 # =====================================================================
 
 @router.message(F.text == "🚀 Экспресс")
@@ -228,7 +240,7 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
     if not message.text.isdigit():
         return await message.answer("❌ Введите сумму цифрами.")
         
-    final_amount = int(message.text)
+    final_amount = float(message.text)
     user_id = message.from_user.id
     data = await state.get_data()
     express_legs = data.get("express_legs", [])
@@ -239,7 +251,7 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             for leg in express_legs:
                 m_id = leg['match_id']
                 b_t = leg['bet_type']
-                m_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", m_id)
+                m_data = await conn.fetchrow("SELECT id, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", m_id)
                 if m_data:
                     m_dict = dict(m_data)
                     col = f"coef_{b_t}"
@@ -253,10 +265,8 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             if balance < final_amount:
                 return await message.answer("❌ Недостаточно баланса для экспресса!")
 
-            # Упаковываем данные экспресса в JSON, чтобы база 100% это приняла
             matches_json = json.dumps(express_legs)
             
-            # Автосоздание отдельной таблицы для экспрессов, чтобы не ломать старую
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS express_bets (
                     id SERIAL PRIMARY KEY,
@@ -270,15 +280,15 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             
             await conn.execute(
                 "INSERT INTO express_bets (user_id, matches_data, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
-                user_id, matches_json, final_amount, float(total_coef)
+                user_id, matches_json, float(final_amount), float(total_coef)
             )
-            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", final_amount, user_id)
+            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", float(final_amount), user_id)
             
-        await message.answer(f"✅ Экспресс успешно оформлен!\n📊 Количество событий: {len(express_legs)}\n🎰 Сумма: {final_amount} ⭐ | Итоговый кэф: {total_coef}")
+        await message.answer(f"✅ Экспресс успешно оформлен!\n📊 Количество событий: {len(express_legs)}\n🎰 Сумма: {final_amount} | Итоговый кэф: {total_coef}")
         await state.clear()
     except Exception as e:
         print(f"Ошибка сохранения экспресса: {e}")
-        await message.answer("❌ Ошибка при регистрации экспресс-ставки.")
+        await message.answer(f"❌ Ошибка при регистрации экспресс-ставки: {e}")
         await state.clear()
 
 # =====================================================================
@@ -293,7 +303,7 @@ async def get_bonus(message: Message):
             await conn.execute("UPDATE users SET balance = balance + 150.0 WHERE user_id = $1", user_id)
             new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
             
-        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +150.0 ⭐\n💰 Ваш новый баланс: {new_balance:,.1f} ⭐")
+        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +150.0\n💰 Ваш новый баланс: {new_balance:,.1f}")
     except Exception as e:
         print(f"Ошибка Бонус: {e}")
         await message.answer("❌ Произошла ошибка при получении бонуса.")
@@ -303,8 +313,9 @@ async def my_bets(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
+            # Теперь читаем из новой таблицы
             history = await conn.fetch(
-                "SELECT match_id, outcome, amount, coef, status FROM bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", 
+                "SELECT match_id, outcome, amount, coef, status FROM single_bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", 
                 user_id
             )
             
@@ -315,13 +326,13 @@ async def my_bets(message: Message):
         for idx, bet in enumerate(history, 1):
             status_emoji = "⏳" if bet['status'] == 'pending' else ("✅" if bet['status'] == 'won' else "❌")
             
-            text += f"{idx}. {status_emoji} Одинар | Кэф: {bet['coef']} | Сумма: {bet['amount']} ⭐\n"
+            text += f"{idx}. {status_emoji} Одинар | Кэф: {bet['coef']} | Сумма: {bet['amount']}\n"
             text += f"   Исход: {str(bet['outcome']).upper()} | Статус: {bet['status']}\n\n"
             
         await message.answer(text)
     except Exception as e:
         print(f"Ошибка Мои Ставки: {e}")
-        await message.answer("❌ Не удалось загрузить историю ваших ставок.")
+        await message.answer("❌ Не удалось загрузить историю ваших ставок. Сделайте первую ставку.")
 
 # =====================================================================
 # ПРОФИЛЬ, ТОП 10, РЕФЕРАЛКА И ПРОМОКОДЫ
@@ -334,12 +345,14 @@ async def show_profile(message: Message):
         async with db.pool.acquire() as conn:
             user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
             if not user: return await message.answer("❌ Напишите /start")
-            rank = await conn.fetchval("SELECT COUNT(*) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = $1)", user_id)
-            total_bets = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1", user_id)
-            won_bets = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1 AND status = 'won'", user_id)
+            rank = await conn.fetchval("SELECT COUNT(id) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = $1)", user_id)
+            
+            # Читаем стату по новой таблице
+            total_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1", user_id) or 0
+            won_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
         
-        await message.answer(f"👤 Профиль FTCL BET\n\n🆔 ID: {user_id}\n💰 Баланс: {user['balance']:,.1f} ⭐\n🎰 Всего ставок: {total_bets}\n📈 Винрейт: {winrate}%\n📊 Место в топе: #{rank}")
+        await message.answer(f"👤 Профиль FTCL BET\n\n🆔 ID: {user_id}\n💰 Баланс: {user['balance']:,.1f}\n🎰 Всего одиночных ставок: {total_bets}\n📈 Винрейт: {winrate}%\n📊 Место в топе: #{rank}")
     except Exception: await message.answer("❌ Ошибка профиля.")
 
 @router.message(F.text == "🏆 Топ 10")
@@ -349,7 +362,7 @@ async def show_top_10(message: Message):
             top_users = await conn.fetch("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10")
         text = "🏆 ТОП 10 ИГРОКОВ FTCL BET 🏆\n\n"
         for index, user in enumerate(top_users, 1):
-            text += f"{index}. ID: {user['user_id']} — {user['balance']:,.1f} ⭐\n"
+            text += f"{index}. ID: {user['user_id']} — {user['balance']:,.1f}\n"
         await message.answer(text)
     except Exception: await message.answer("❌ Ошибка загрузки топа.")
 
@@ -362,7 +375,7 @@ async def show_referral(message: Message):
     
     await message.answer(
         "👥 Реферальная программа\n\n"
-        "Приглашай друзей и получай по 250 ⭐ за каждого!\n\n"
+        "Приглашай друзей и получай по 250 на баланс за каждого!\n\n"
         f"Твоя ссылка для приглашений:\n{ref_link}"
     )
 
@@ -379,7 +392,6 @@ async def process_promo(message: Message, state: FSMContext):
     
     try:
         async with db.pool.acquire() as conn:
-            # Автосоздание таблиц для промокодов
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS promocodes (code TEXT, reward NUMERIC, max_uses INT, current_uses INT DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS used_promos (user_id BIGINT, code TEXT);
@@ -401,7 +413,7 @@ async def process_promo(message: Message, state: FSMContext):
             await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code = $1", code)
             await conn.execute("INSERT INTO used_promos (user_id, code) VALUES ($1, $2)", user_id, code)
             
-            await message.answer(f"✅ Промокод успешно активирован! На баланс зачислено: {reward} ⭐")
+            await message.answer(f"✅ Промокод успешно активирован! На баланс зачислено: {reward}")
     except Exception as e:
         print(f"Ошибка промокода: {e}")
-        await message.answer("❌ Ошибка при проверке промокода.")
+        await message.answer(f"❌ Ошибка при проверке промокода: {e}")
