@@ -61,7 +61,7 @@ async def main():
                         except Exception:
                             pass
 
-        # Главное меню (с добавленными новыми кнопками, без звёздочек в тексте)
+        # Главное меню
         kb = [
             [types.KeyboardButton(text="📋 Матчи"), types.KeyboardButton(text="🚀 Экспресс")],
             [types.KeyboardButton(text="👤 Профиль"), types.KeyboardButton(text="🏆 Топ 10"), types.KeyboardButton(text="👥 Рефералка")],
