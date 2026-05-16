@@ -47,7 +47,8 @@ async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
     await state.update_data(match_id=m_id)
     
     async with db.pool.acquire() as conn:
-        match_data = await conn.fetchrow("SELECT id, title, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", m_id)
+        # Используем SELECT *, чтобы избежать ошибок с именами колонок
+        match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", m_id)
         
     if not match_data:
         return await callback.answer("❌ Матч не найден.", show_alert=True)
@@ -59,7 +60,7 @@ async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
     c_p2 = round(float(m_dict.get("coef_p2") or 2.0), 1)
     c_tb = round(float(m_dict.get("coef_tb") or 2.0), 1)
     c_tm = round(float(m_dict.get("coef_tm") or 2.0), 1)
-    c_oz = round(float(m_dict.get("coef_oz") or m_dict.get("coef_oz_yes") or 2.0), 1)
+    c_oz = round(float(m_dict.get("coef_oz_yes") or m_dict.get("coef_oz") or 2.0), 1)
 
     builder = InlineKeyboardBuilder()
     builder.button(text=f"П1 ({c_p1})", callback_data=f"bet_p1_{m_id}")
@@ -89,7 +90,7 @@ async def select_bet_outcome(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # =====================================================================
-# 2. РАДИКАЛЬНЫЙ ФИКС СТАВКИ (НОВАЯ ЧИСТАЯ ТАБЛИЦА)
+# 2. ФИКС ОДИНОЧНОЙ СТАВКИ
 # =====================================================================
 
 @router.message(BetStates.waiting_for_amount)
@@ -116,7 +117,8 @@ async def accept_bet_amount(message: Message, state: FSMContext):
             if balance < bet_amount:
                 return await message.answer("❌ Недостаточно средств на игровом балансе!")
 
-            match_data = await conn.fetchrow("SELECT id, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", int(match_id))
+            # Защита от падения: запрашиваем через звездочку
+            match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", int(match_id))
             if not match_data:
                 return await message.answer("❌ Матч больше не существует.")
 
@@ -124,11 +126,11 @@ async def accept_bet_amount(message: Message, state: FSMContext):
             col_name = f"coef_{bet_type}"
             if bet_type == "tb2.5": col_name = "coef_tb"
             elif bet_type == "tm2.5": col_name = "coef_tm"
-            elif bet_type == "oz": col_name = "coef_oz" if "coef_oz" in match_dict else "coef_oz_yes"
+            elif bet_type == "oz": 
+                col_name = "coef_oz_yes" if "coef_oz_yes" in match_dict else "coef_oz"
             
             coef = round(float(match_dict.get(col_name) or 2.0), 1)
 
-            # Создаем новую таблицу, чтобы обойти ошибки старой
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS single_bets (
                     id SERIAL PRIMARY KEY,
@@ -251,13 +253,14 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             for leg in express_legs:
                 m_id = leg['match_id']
                 b_t = leg['bet_type']
-                m_data = await conn.fetchrow("SELECT id, coef_p1, coef_x, coef_p2, coef_tb, coef_tm, coef_oz, coef_oz_yes FROM matches WHERE id = $1", m_id)
+                m_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", m_id)
                 if m_data:
                     m_dict = dict(m_data)
                     col = f"coef_{b_t}"
                     if b_t == "tb2.5": col = "coef_tb"
                     elif b_t == "tm2.5": col = "coef_tm"
-                    elif b_t == "oz": col = "coef_oz" if "coef_oz" in m_dict else "coef_oz_yes"
+                    elif b_t == "oz": 
+                        col = "coef_oz_yes" if "coef_oz_yes" in m_dict else "coef_oz"
                     total_coef *= float(m_dict.get(col) or 1.0)
             
             total_coef = round(total_coef, 1)
@@ -313,7 +316,6 @@ async def my_bets(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
-            # Теперь читаем из новой таблицы
             history = await conn.fetch(
                 "SELECT match_id, outcome, amount, coef, status FROM single_bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", 
                 user_id
@@ -347,7 +349,6 @@ async def show_profile(message: Message):
             if not user: return await message.answer("❌ Напишите /start")
             rank = await conn.fetchval("SELECT COUNT(id) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = $1)", user_id)
             
-            # Читаем стату по новой таблице
             total_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1", user_id) or 0
             won_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
