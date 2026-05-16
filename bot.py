@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 # ========================================================
 async def handle_health_check(request):
     """Отвечает Render, что с ботом всё в порядке"""
-    return web.Response(text="Бот FTCL/MIFL успешно работает!", status=200)
+    return web.Response(text="Бот FTCL BET успешно работает!", status=200)
 
 async def start_render_port_listener():
     """Запускает веб-сервер на порту, который требует Render"""
@@ -65,7 +65,10 @@ async def main():
     # 4. Запускаем веб-сервер для порта Render в фоновом таске
     asyncio.create_task(start_render_port_listener())
 
-    # 5. Старт поллинга aiogram
+    # 5. УДАЛЯЕМ СТАРЫЙ ВЕБХУК (Это решит ошибку Conflict!)
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    # 6. Старт поллинга aiogram
     logging.info("Бот запущен в режиме Long Polling!")
     await dp.start_polling(bot)
 
