@@ -69,7 +69,7 @@ async def main():
         ]
         keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
         await message.answer(
-            "👋 Привет! Добро пожаловать в симулятор ставок лиг FTCL и MIFL!\n"
+            "👋 Привет! Добро пожаловать в симулятор ставок FTCL 3 и 4!\n"
             "Выберите интересующий раздел в меню ниже:", 
             reply_markup=keyboard
         )
