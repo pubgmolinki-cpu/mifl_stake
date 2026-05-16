@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timedelta
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -7,6 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import db
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 class UserBetStates(StatesGroup):
     waiting_for_amount = State()
@@ -32,7 +34,7 @@ async def show_profile(message: types.Message):
         bets_count = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1", message.from_user.id)
         
     await message.answer(
-        f"👤 Ваш профиль FTCL BET (3-4 DIV)\n\n"
+        f"👤 Ваш профиль FTCL BET (3-4 Div)\n\n"
         f"🆔 Твой ID: {message.from_user.id}\n"
         f"💰 Игровой баланс: {round(balance, 1)} ⭐️\n"
         f"📊 Всего сделано ставок: {bets_count}"
@@ -93,7 +95,7 @@ async def my_bets(message: types.Message):
     await message.answer(text)
 
 # ==========================================
-# ОДИНОЧНЫЕ СТАВКИ (ИСПРАВЛЕН БАГ ДВОЙНОГО КЛИКА)
+# ОДИНОЧНЫЕ СТАВКИ
 # ==========================================
 @router.message(F.text == "📋 Матчи")
 async def show_matches_inline(message: types.Message):
@@ -148,21 +150,24 @@ async def accept_bet_amount(message: types.Message, state: FSMContext):
         return await message.answer("❌ Сумма должна быть больше нуля!")
 
     data = await state.get_data()
-    # МГНОВЕННО СБРАСЫВАЕМ СОСТОЯНИЕ (Блокируем повторный ввод)
     await state.clear()
 
-    async with db.pool.acquire() as conn:
-        async with conn.transaction():  # Безопасная транзакция базы данных
-            user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", message.from_user.id)
-            if not user or user['balance'] < amount:
-                return await message.answer("❌ Недостаточно средств на балансе!")
+    try:
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", message.from_user.id)
+                if not user or user['balance'] < amount:
+                    return await message.answer("❌ Недостаточно средств на балансе!")
 
-            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", amount, message.from_user.id)
-            await conn.execute(
-                "INSERT INTO bets (user_id, match_ids, outcomes, coef, amount, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
-                message.from_user.id, [data['match_id']], [data['outcome']], data['coef'], amount
-            )
-    await message.answer(f"✅ Ставка принята!\nИсход: {data['outcome'].upper()} | Кэф: {data['coef']}\nСумма: {amount} ⭐️")
+                await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", amount, message.from_user.id)
+                await conn.execute(
+                    "INSERT INTO bets (user_id, match_ids, outcomes, coef, amount, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+                    message.from_user.id, [data['match_id']], [data['outcome']], data['coef'], amount
+                )
+        await message.answer(f"✅ Ставка принята!\nИсход: {data['outcome'].upper()} | Кэф: {data['coef']}\nСумма: {amount} ⭐️")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении одиночной ставки: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка на сервере при оформлении ставки. Попробуйте еще раз.")
 
 # ==========================================
 # МОДУЛЬ ЭКСПРЕСС-СТАВОК
@@ -201,7 +206,6 @@ async def add_outcome_to_express(callback: types.CallbackQuery, state: FSMContex
     data = await state.get_data()
     express_list = data.get("express_list", [])
 
-    # Проверка, чтобы не ставить на один матч дважды в экспрессе
     if any(item['match_id'] == int(match_id) for item in express_list):
         return await callback.answer("❌ Вы уже добавили исход из этого матча!", show_alert=True)
 
@@ -267,18 +271,22 @@ async def accept_express_amount(message: types.Message, state: FSMContext):
         total_coef *= item['coef']
     total_coef = round(total_coef, 1)
 
-    async with db.pool.acquire() as conn:
-        async with conn.transaction():
-            user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", message.from_user.id)
-            if not user or user['balance'] < amount:
-                return await message.answer("❌ Недостаточно средств на балансе!")
+    try:
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", message.from_user.id)
+                if not user or user['balance'] < amount:
+                    return await message.answer("❌ Недостаточно средств на балансе!")
 
-            await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", amount, message.from_user.id)
-            await conn.execute(
-                "INSERT INTO bets (user_id, match_ids, outcomes, coef, amount, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
-                message.from_user.id, match_ids, outcomes, total_coef, amount
-            )
-    await message.answer(f"✅ Экспресс успешно принят!\nМатчей в купоне: {len(match_ids)}\nОбщий кэф: {total_coef}\nСумма: {amount} ⭐️")
+                await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", amount, message.from_user.id)
+                await conn.execute(
+                    "INSERT INTO bets (user_id, match_ids, outcomes, coef, amount, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+                    message.from_user.id, match_ids, outcomes, total_coef, amount
+                )
+        await message.answer(f"✅ Экспресс успешно принят!\nМатчей в купоне: {len(match_ids)}\nОбщий кэф: {total_coef}\nСумма: {amount} ⭐️")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении экспресс-ставки: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка на сервере при оформлении экспресса. Попробуйте еще раз.")
 
 # ==========================================
 # МОДУЛЬ ПРОМОКОДОВ
@@ -306,7 +314,6 @@ async def activate_promocode(message: types.Message, state: FSMContext):
             if already_used > 0:
                 return await message.answer("❌ Вы уже активировали этот промокод ранее!")
 
-            # Начисляем награду, списываем попытку использования, заносим в лог юзера
             await conn.execute("INSERT INTO user_promos (user_id, code) VALUES ($1, $2)", message.from_user.id, code_entered)
             await conn.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code = $1", code_entered)
             await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", promo['reward'], message.from_user.id)
