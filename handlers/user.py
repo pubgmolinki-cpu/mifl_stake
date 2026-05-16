@@ -1,85 +1,139 @@
-from aiogram import Router, F, types
-from database import db
-from keyboards import main_menu
+import json
+import logging
 from datetime import datetime, timedelta
+from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from database import db
 
 router = Router()
+logger = logging.getLogger(__name__)
 
-@router.message(F.text == "/start")
-async def cmd_start(message: types.Message):
-    args = message.text.split()
-    referrer_id = int(args[1].replace("ref_", "")) if len(args) > 1 and args[1].startswith("ref_") else None
-    
-    user = await db.get_user(message.from_user.id)
-    if not user:
-        await db.register_user(message.from_user.id, message.from_user.username, referrer_id)
-        if referrer_id:
-            await db.update_balance(referrer_id, 500)
-            await db.update_balance(message.from_user.id, 250)
-            
-    await message.answer("⚽️ Добро пожаловать в FTCL BET BOT!", reply_markup=main_menu())
-
+# ==========================================
+# 1. ОСНОВНОЙ ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ
+# ==========================================
 @router.message(F.text == "👤 Профиль")
-async def user_profile(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    rank = await db.get_user_rank(message.from_user.id)
-    bets = await db.get_user_bets(message.from_user.id)
-    
-    total_bets = len(bets)
-    wins = sum(1 for b in bets if b['status'] == 'won')
-    winrate = (wins / total_bets * 100) if total_bets > 0 else 0.0
-    
-    text = (
-        f"👤 **{message.from_user.first_name}**\n\n"
-        f"🏆 Место в топе: #{rank}\n"
-        f"💰 Баланс: {user['balance']} ⭐️\n\n"
-        f"📊 Статистика ставок:\n"
-        f"Всего: {total_bets}\n"
-        f"✅ Победы: {wins}\n"
-        f"🎯 Винрейт: {winrate:.1f}%\n"
+async def show_profile(message: types.Message):
+    async with db.pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", message.from_user.id)
+        # Если юзера почему-то нет в БД, создаем его базовый профиль
+        if not user:
+            await conn.execute("INSERT INTO users (user_id, balance) VALUES ($1, 1000.0)", message.from_user.id)
+            balance = 1000.0
+        else:
+            balance = user['balance']
+            
+        bets_count = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1", message.from_user.id)
+        
+    await message.answer(
+        f"👤 Ваш профиль FTCL/MIFL\n\n"
+        f"🆔 Твой ID: `{message.from_user.id}`\n"
+        f"💰 Игровой баланс: `{round(balance, 1)}` ⭐️\n"
+        f"📊 Всего сделано ставок: `{bets_count}`",
+        parse_mode="Markdown"
     )
-    await message.answer(text, parse_mode="Markdown")
 
+
+# ==========================================
+# 2. ЕЖЕДНЕВНЫЙ БОНУС К БАЛАНСУ
+# ==========================================
 @router.message(F.text == "🎁 Бонус")
-async def daily_bonus(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    now = datetime.now()
-    
-    if user['last_bonus'] and now - user['last_bonus'] < timedelta(days=1):
-        remains = timedelta(days=1) - (now - user['last_bonus'])
-        hours, remainder = divmod(remains.seconds, 3600)
-        minutes, _ = divmod(remainder, 60)
-        await message.answer(f"❌ Вы уже забрали бонус. Приходите через {hours}ч {minutes}м.")
-        return
-        
-    await db.update_balance(message.from_user.id, 100)
+async def get_bonus(message: types.Message):
     async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE users SET last_bonus = $1 WHERE tg_id = $2", now, message.from_user.id)
+        user = await conn.fetchrow("SELECT last_bonus FROM users WHERE user_id = $1", message.from_user.id)
         
-    await message.answer("🎁 Ежедневный бонус!\n\n💰 Начислено: 100 ⭐️")
+        now = datetime.now()
+        # Проверяем, прошло ли 24 часа с момента последнего получения
+        if user and user['last_bonus'] and (now - user['last_bonus']) < timedelta(hours=24):
+            time_passed = now - user['last_bonus']
+            seconds_left = 86400 - time_passed.total_seconds()
+            hours_left = int(seconds_left // 3600)
+            minutes_left = int((seconds_left % 3600) // 60)
+            
+            await message.answer(f"⏳ Вы уже забирали бонус! Приходите снова через: {hours_left}ч. {minutes_left}мин.")
+            return
 
-@router.message(F.text == "👥 Рефералка")
-async def referral_program(message: types.Message):
-    bot_info = await message.bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref_{message.from_user.id}"
-    
-    async with db.pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id = $1", message.from_user.id)
+        bonus_amount = 500.0  # Сумма ежедневного бонуса
+        await conn.execute(
+            "UPDATE users SET balance = balance + $1, last_bonus = $2 WHERE user_id = $3", 
+            bonus_amount, now, message.from_user.id
+        )
         
-    text = (
-        f"👥 **Реферальная программа**\n\n"
-        f"🔗 Ваша ссылка:\n`{ref_link}`\n\n"
-        f"💰 За каждого друга: 500 ⭐️\n"
-        f"🎁 Бонус другу: 250 ⭐️\n\n"
-        f"👤 Всего рефералов: {count}"
-    )
+    await message.answer(f"🎉 Отлично! Вам начислено: **+{round(bonus_amount, 1)} ⭐️**")
+
+
+# ==========================================
+# 3. ИСТОРИЯ ПОСЛЕДНИХ СТАВОК ИГРОКА
+# ==========================================
+@router.message(F.text == "📊 Мои Ставки")
+async def my_bets(message: types.Message):
+    async with db.pool.acquire() as conn:
+        bets = await conn.fetch("SELECT id, amount, coef, status FROM bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", message.from_user.id)
+    
+    if not bets:
+        return await message.answer("ℹ️ У вас пока нет открытых или завершенных ставок.")
+
+    text = "📝 **Ваши последние 5 купонов:**\n\n"
+    for b in bets:
+        if b['status'] == 'won':
+            status_emoji = "🟢 Выигрыш"
+        elif b['status'] == 'lost':
+            status_emoji = "🔴 Проигрыш"
+        else:
+            status_emoji = "⏳ В игре"
+            
+        text += f"{status_emoji} | Купон #{b['id']}\nСумма: `{round(b['amount'], 1)}` ⭐️ | Кэф: `{round(b['coef'], 1)}`\n"
+        text += "—" * 15 + "\n"
+        
     await message.answer(text, parse_mode="Markdown")
 
-@router.message(F.text == "🏆 Топ-10")
-async def leaderboard(message: types.Message):
-    top_users = await db.get_top_users()
-    text = "🏆 **Топ-10 Игроков:**\n\n"
-    for i, user in enumerate(top_users, 1):
-        username = f"@{user['username']}" if user['username'] else "Игрок"
-        text += f"{i}. {username} — {user['balance']} ⭐️\n"
-    await message.answer(text, parse_mode="Markdown")
+
+# ==========================================
+# 4. ИНЛАЙН ВЫБОР МАТЧЕЙ (ЛИНИЯ)
+# ==========================================
+@router.message(F.text == "📋 Матчи")
+async def show_matches_inline(message: types.Message):
+    async with db.pool.acquire() as conn:
+        matches = await conn.fetch("SELECT id, title FROM matches WHERE status = 'active' ORDER BY id DESC")
+    
+    if not matches:
+        return await message.answer("😔 На данный момент нет активных матчей для ставок.")
+
+    # Строим клавиатуру: каждая кнопка — отдельный матч
+    builder = []
+    for m in matches:
+        builder.append([InlineKeyboardButton(text=f"⚽️ {m['title']}", callback_data=f"match_{m['id']}")])
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=builder)
+    await message.answer("👇 Выберите интересующий матч из списка:", reply_markup=kb, parse_mode="Markdown")
+
+
+# ==========================================
+# 5. ИНТЕРАКТИВНЫЕ СТАВКИ (ДОЛГОСРОЧНЫЕ СОБЫТИЯ)
+# ==========================================
+@router.message(F.text == "🎭 Интерактивные Ставки")
+async def show_interactive(message: types.Message):
+    async with db.pool.acquire() as conn:
+        events = await conn.fetch("SELECT id, title, options FROM interactive_bets WHERE status = 'active' ORDER BY id DESC")
+        
+    if not events:
+        return await message.answer("ℹ️ Сейчас нет активных интерактивных событий.")
+
+    for event in events:
+        options = json.loads(event['options'])
+        text = f"🏆 АКТУАЛЬНЫЙ ИНТЕРАКТИВ:\n🔥 `{event['title']}`\n\n"
+        text += "📈 Доступные котировки на исходы:\n"
+        
+        builder = []
+        for opt_name, coef in options.items():
+            # Округляем коэффициент интерактива до 1 знака
+            rounded_coef = round(float(coef), 1)
+            text += f"• {opt_name} — `{rounded_coef}`\n"
+            
+            # Инлайн кнопка для мгновенного выбора ставки игроком
+            builder.append([InlineKeyboardButton(
+                text=f"{opt_name} ({rounded_coef})", 
+                callback_data=f"ib_{event['id']}_{opt_name}"
+            )])
+            
+        kb = InlineKeyboardMarkup(inline_keyboard=builder)
+        await message.answer(text, reply_markup=kb, parse_mode="Markdown")
