@@ -22,7 +22,6 @@ async def list_matches(message: types.Message):
         )
         await message.answer(text, reply_markup=match_outcome_keyboard(m['id']), parse_mode="Markdown")
 
-# Обработка выбора исхода для одиночной ставки
 @router.callback_query(F.data.startswith("bet_"))
 async def process_single_bet_selection(callback: types.CallbackQuery, state: FSMContext):
     _, match_id, outcome = callback.data.split("_")
@@ -58,7 +57,6 @@ async def finish_single_bet(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Ставка принята!\nМатч: {data['title']}\nИсход: {data['outcome'].upper()}\nСумма: {amount} ⭐️")
     await state.clear()
 
-# Логика экспресса
 @router.message(F.text == "🎰 Экспресс")
 async def start_express(message: types.Message, state: FSMContext):
     matches = await db.get_active_matches()
@@ -70,8 +68,8 @@ async def start_express(message: types.Message, state: FSMContext):
     
     kb = types.InlineKeyboardMarkup(inline_keyboard=[])
     for m in matches:
-        kb.inline_keyboard.append([InlineKeyboardButton(text=m['title'], callback_data=f"expadd_{m['id']}")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="📥 Завершить выбор матчей", callback_data="exp_done")])
+        kb.inline_keyboard.append([types.InlineKeyboardButton(text=m['title'], callback_data=f"expadd_{m['id']}")])
+    kb.inline_keyboard.append([types.InlineKeyboardButton(text="📥 Завершить выбор матчей", callback_data="exp_done")])
     
     await message.answer("Выберите матчи для сборки экспресса:", reply_markup=kb)
     await state.set_state(BetStates.express_select_matches)
@@ -96,7 +94,6 @@ async def process_express_outcomes(callback: types.CallbackQuery, state: FSMCont
         await callback.answer("Выберите как минимум 2 матча!", show_alert=True)
         return
         
-    # Переходим к выбору исходов поочередно
     await next_express_outcome(callback.message, state)
     await callback.answer()
 
@@ -110,13 +107,12 @@ async def next_express_outcome(message: types.Message, state: FSMContext):
         async with db.pool.acquire() as conn:
             match = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", match_id)
         
-        # Передаем клавиатуру для выбора исхода, но с флагом exp_
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="П1", callback_data=f"expout_{match_id}_p1"),
-             InlineKeyboardButton(text="Х", callback_data=f"expout_{match_id}_x"),
-             InlineKeyboardButton(text="П2", callback_data=f"expout_{match_id}_p2")],
-            [InlineKeyboardButton(text="ТБ 2.5", callback_data=f"expout_{match_id}_tb"),
-             InlineKeyboardButton(text="ТМ 2.5", callback_data=f"expout_{match_id}_tm")]
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="П1", callback_data=f"expout_{match_id}_p1"),
+             types.InlineKeyboardButton(text="Х", callback_data=f"expout_{match_id}_x"),
+             types.InlineKeyboardButton(text="П2", callback_data=f"expout_{match_id}_p2")],
+            [types.InlineKeyboardButton(text="ТБ 2.5", callback_data=f"expout_{match_id}_tb"),
+             types.InlineKeyboardButton(text="ТМ 2.5", callback_data=f"expout_{match_id}_tm")]
         ])
         await message.answer(f"Выберите исход для матча **{match['title']}**:", reply_markup=kb, parse_mode="Markdown")
         await state.set_state(BetStates.express_select_outcomes)
