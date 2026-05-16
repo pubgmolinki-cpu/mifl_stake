@@ -187,12 +187,25 @@ async def process_settle_score(message: types.Message, state: FSMContext):
     if ":" not in message.text: return await message.answer("❌ Формат счета через двоеточие!")
     data = await state.get_data()
     m_id, score_str = data['match_id'], message.text.strip()
-    g1, g2 = map(int, score_str.split(":"))
+    
+    try:
+        g1, g2 = map(int, score_str.split(":"))
+    except ValueError:
+        return await message.answer("❌ Неверный формат счета! Введите числа, например 2:0")
 
+    # Формируем список выигрышных исходов (с поддержкой разных версий кнопок)
     winning = []
     winning.append("p1" if g1 > g2 else "x" if g1 == g2 else "p2")
-    winning.append("tb" if (g1 + g2) > 2.5 else "tm")
-    winning.append("oz_yes" if g1 > 0 and g2 > 0 else "oz_no")
+    
+    if (g1 + g2) > 2.5:
+        winning.extend(["tb", "tb2.5"])
+    else:
+        winning.extend(["tm", "tm2.5"])
+        
+    if g1 > 0 and g2 > 0:
+        winning.extend(["oz", "oz_yes"])
+    else:
+        winning.extend(["oz_no"])
 
     async with db.pool.acquire() as conn:
         match_info = await conn.fetchrow("SELECT title FROM matches WHERE id = $1", m_id)
@@ -218,10 +231,6 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                     except Exception: pass
                 else:
                     # Экспресс. Проверяем, все ли остальные матчи в нем сыграли
-                    # Для простоты: если все сыграли в плюс - выигрыш, иначе ждем завершения остальных
-                    # Удалим текущий id матча из "ожидания"
-                    # В полноценной реализации хранят статус каждого матча внутри купона, тут мы просто проверяем финальный результат
-                    # Если все матчи купона закрыты как finished — экспресс заходит.
                     all_finished = True
                     for m_in_bet in b['match_ids']:
                         m_stat = await conn.fetchval("SELECT status FROM matches WHERE id = $1", m_in_bet)
@@ -232,7 +241,7 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                         win_sum = b['amount'] * b['coef']
                         await conn.execute("UPDATE bets SET status = 'won' WHERE id = $1", b['id'])
                         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", win_sum, b['user_id'])
-                        try: await message.bot.send_message(b['user_id'], f"🟢 Экспресс №{b['id']} выиграл!\n💰 +{round(win_sum, 1)} ⭐️")
+                        try: await message.bot.send_message(b['user_id'], f"🟢 Экспресс №{b['id']} выиграла!\n💰 +{round(win_sum, 1)} ⭐️")
                         except Exception: pass
             else:
                 # Если хоть один исход не угадан — купон сразу проиграл
