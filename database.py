@@ -24,8 +24,6 @@ class Database:
                         referred_by BIGINT DEFAULT NULL
                     );
                 ''')
-                
-                # Добавляем колонку реферала на случай, если таблица уже была
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT DEFAULT NULL;")
 
                 # 2. Таблица футбольных матчей
@@ -53,7 +51,7 @@ class Database:
                     );
                 ''')
 
-                # 4. Связующая таблица (кто какой промокод уже активировал)
+                # 4. Связующая таблица промокодов
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS user_promos (
                         user_id BIGINT,
@@ -62,7 +60,7 @@ class Database:
                     );
                 ''')
 
-                # 5. Таблица купонов ставок (поддерживает и одинары, и экспрессы)
+                # 5. Таблица купонов ставок
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS bets (
                         id SERIAL PRIMARY KEY,
@@ -75,6 +73,10 @@ class Database:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 ''')
+                
+                # АВТО-МИГРАЦИЯ: Добавляем колонки массивов для поддержки экспрессов в старой БД
+                await conn.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS match_ids INT[];")
+                await conn.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS outcomes TEXT[];")
                 
             logger.info("Все таблицы базы данных успешно проверены и обновлены.")
         except Exception as e:
