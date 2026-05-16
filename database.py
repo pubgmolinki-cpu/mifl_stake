@@ -6,12 +6,10 @@ logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self):
-        # Переменная окружения для Render/Railway, либо локальная БД по умолчанию
         self.db_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
         self.pool = None
 
     async def connect(self):
-        """Создает пул подключений к PostgreSQL и инициализирует таблицы"""
         try:
             self.pool = await asyncpg.create_pool(self.db_url)
             logger.info("Успешное подключение к базе данных PostgreSQL.")
@@ -22,12 +20,13 @@ class Database:
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
                         balance NUMERIC DEFAULT 1000.0,
-                        last_bonus TIMESTAMP DEFAULT NULL
+                        last_bonus TIMESTAMP DEFAULT NULL,
+                        referred_by BIGINT DEFAULT NULL
                     );
                 ''')
                 
-                # Проверка на случай старой структуры
-                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus TIMESTAMP DEFAULT NULL;")
+                # Добавляем колонку реферала на случай, если таблица уже была
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by BIGINT DEFAULT NULL;")
 
                 # 2. Таблица футбольных матчей
                 await conn.execute('''
@@ -45,17 +44,25 @@ class Database:
                     );
                 ''')
 
-                # 3. Таблица интерактивных ставок (долгосрочные события)
+                # 3. Таблица промокодов
                 await conn.execute('''
-                    CREATE TABLE IF NOT EXISTS interactive_bets (
-                        id SERIAL PRIMARY KEY,
-                        title TEXT,
-                        options JSONB,
-                        status TEXT DEFAULT 'active'
+                    CREATE TABLE IF NOT EXISTS promocodes (
+                        code TEXT PRIMARY KEY,
+                        reward NUMERIC,
+                        uses_left INT
                     );
                 ''')
 
-                # 4. Таблица купонов ставок
+                # 4. Связующая таблица (кто какой промокод уже активировал)
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS user_promos (
+                        user_id BIGINT,
+                        code TEXT,
+                        PRIMARY KEY (user_id, code)
+                    );
+                ''')
+
+                # 5. Таблица купонов ставок (поддерживает и одинары, и экспрессы)
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS bets (
                         id SERIAL PRIMARY KEY,
