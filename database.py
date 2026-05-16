@@ -1,47 +1,39 @@
 import os
 import logging
-import asyncio
 import asyncpg
 
 logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self):
-        # Берем URL подключения к базе из переменных окружения (например, на Render или Railway)
+        # Переменная окружения для Render/Railway, либо локальная БД по умолчанию
         self.db_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
         self.pool = None
 
     async def connect(self):
-        """Создает пул подключений к базе данных PostgreSQL и проверяет таблицы"""
+        """Создает пул подключений к PostgreSQL и инициализирует таблицы"""
         try:
             self.pool = await asyncpg.create_pool(self.db_url)
-            logger.info("Успешное подключение к пулу базы данных PostgreSQL.")
+            logger.info("Успешное подключение к базе данных PostgreSQL.")
             
-            # Автоматическая инициализация и обновление таблиц под новый функционал
             async with self.pool.acquire() as conn:
-                # Таблица пользователей
+                # 1. Таблица пользователей
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS users (
                         user_id BIGINT PRIMARY KEY,
-                        balance TEXT DEFAULT '1000.0',
+                        balance NUMERIC DEFAULT 1000.0,
                         last_bonus TIMESTAMP DEFAULT NULL
                     );
                 ''')
                 
-                # Переводим balance на NUMERIC, если он вдруг был создан как TEXT
-                try:
-                    await conn.execute("ALTER TABLE users ALTER COLUMN balance TYPE NUMERIC USING balance::numeric;")
-                except Exception:
-                    pass
-                
-                # Добавляем колонку времени бонуса на случай, если таблица уже существовала без неё
+                # Проверка на случай старой структуры
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_bonus TIMESTAMP DEFAULT NULL;")
 
-                # Таблица футбольных матчей
+                # 2. Таблица футбольных матчей
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS matches (
                         id SERIAL PRIMARY KEY,
-                        title TEXT NOT EXISTS UNIQUE,
+                        title TEXT UNIQUE,
                         coef_p1 NUMERIC,
                         coef_x NUMERIC,
                         coef_p2 NUMERIC,
@@ -52,11 +44,8 @@ class Database:
                         status TEXT DEFAULT 'active'
                     );
                 ''')
-                try:
-                    await conn.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS title TEXT;")
-                except Exception: pass
 
-                # Таблица интерактивных ставок
+                # 3. Таблица интерактивных ставок (долгосрочные события)
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS interactive_bets (
                         id SERIAL PRIMARY KEY,
@@ -66,7 +55,7 @@ class Database:
                     );
                 ''')
 
-                # Таблица купонов ставок игроков
+                # 4. Таблица купонов ставок
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS bets (
                         id SERIAL PRIMARY KEY,
@@ -82,8 +71,7 @@ class Database:
                 
             logger.info("Все таблицы базы данных успешно проверены и обновлены.")
         except Exception as e:
-            logger.critical(f"Критическая ошибка при инициализации базы данных: {e}", exc_info=True)
+            logger.critical(f"Ошибка при инициализации базы данных: {e}", exc_info=True)
             raise e
 
-# Экспортируем глобальный объект базы данных
 db = Database()
