@@ -19,8 +19,14 @@ class ExpressStates(StatesGroup):
 class PromoStates(StatesGroup):
     waiting_for_code = State()
 
+# Вспомогательная функция проверки заморозки ставок
+async def check_bets_lock(conn) -> bool:
+    await conn.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+    status = await conn.fetchval("SELECT value FROM bot_settings WHERE key = 'bets_locked'")
+    return status == 'true'
+
 # =====================================================================
-# 1. МАТЧИ
+# 1. МАТЧИ И СТАВКИ
 # =====================================================================
 
 @router.message(F.text == "📋 Матчи")
@@ -32,8 +38,7 @@ async def show_matches(message: Message):
     if not active_matches:
         return await message.answer("🎰 На данный момент нет активных матчей.")
         
-    text = "Выберите матч на который готовы поставить! 👇"
-    
+    text = "Выберите матч, на который готовы поставить! 👇"
     for m in active_matches:
         builder.button(text=f"{m['title']}", callback_data=f"select_match_{m['id']}")
     
@@ -44,16 +49,19 @@ async def show_matches(message: Message):
 @router.callback_query(F.data.startswith("select_match_"))
 async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
     m_id = int(callback.data.split("_")[2])
-    await state.update_data(match_id=m_id)
     
     async with db.pool.acquire() as conn:
-        # Используем SELECT *, чтобы избежать ошибок с именами колонок
+        # Проверка на административную заморозку ставок
+        if await check_bets_lock(conn):
+            return await callback.answer("❌ Ставки временно заморожены администрацией (идет слив результатов/подсчет)!", show_alert=True)
+            
         match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", m_id)
         
     if not match_data:
         return await callback.answer("❌ Матч не найден.", show_alert=True)
         
     m_dict = dict(match_data)
+    await state.update_data(match_id=m_id)
     
     c_p1 = round(float(m_dict.get("coef_p1") or 2.0), 1)
     c_x = round(float(m_dict.get("coef_x") or 2.0), 1)
@@ -77,27 +85,24 @@ async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("bet_"))
 async def select_bet_outcome(callback: CallbackQuery, state: FSMContext):
+    async with db.pool.acquire() as conn:
+        if await check_bets_lock(conn):
+            return await callback.answer("❌ Ошибка: прием ставок только что был закрыт администратором!", show_alert=True)
+
     parts = callback.data.split("_")
     chosen_outcome = parts[1]
     match_id = int(parts[2])
     
     await state.update_data(bet_type=chosen_outcome, match_id=match_id)
-    await callback.message.answer(
-        f"📊 Вы выбрали исход {chosen_outcome.upper()}.\n"
-        "💰 Введите сумму ставки в чат:"
-    )
+    await callback.message.answer(f"📊 Вы выбрали исход {chosen_outcome.upper()}.\n💰 Введите сумму ставки в чат:")
     await state.set_state(BetStates.waiting_for_amount)
     await callback.answer()
 
-# =====================================================================
-# 2. ФИКС ОДИНОЧНОЙ СТАВКИ
-# =====================================================================
 
 @router.message(BetStates.waiting_for_amount)
 async def accept_bet_amount(message: Message, state: FSMContext):
     if not message.text.isdigit():
-        await message.answer("❌ Пожалуйста, введите сумму ставки цифрами.")
-        return
+        return await message.answer("❌ Пожалуйста, введите сумму ставки цифрами.")
 
     bet_amount = float(message.text)
     user_id = message.from_user.id
@@ -113,11 +118,14 @@ async def accept_bet_amount(message: Message, state: FSMContext):
 
     try:
         async with db.pool.acquire() as conn:
+            if await check_bets_lock(conn):
+                await state.clear()
+                return await message.answer("❌ Администратор закрыл ставки. Ваша ставка отклонена!")
+
             balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
             if balance < bet_amount:
                 return await message.answer("❌ Недостаточно средств на игровом балансе!")
 
-            # Защита от падения: запрашиваем через звездочку
             match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", int(match_id))
             if not match_data:
                 return await message.answer("❌ Матч больше не существует.")
@@ -153,16 +161,19 @@ async def accept_bet_amount(message: Message, state: FSMContext):
         await state.clear()
 
     except Exception as e:
-        print(f"Ошибка одиночной ставки: {e}")
-        await message.answer(f"❌ Ошибка БД: {e}")
+        await message.answer(f"❌ Ошибка БД при ставке: {e}")
         await state.clear()
 
 # =====================================================================
-# 3. ЭКСПРЕССЫ
+# 2. ЭКСПРЕССЫ
 # =====================================================================
 
 @router.message(F.text == "🚀 Экспресс")
 async def start_express(message: Message, state: FSMContext):
+    async with db.pool.acquire() as conn:
+        if await check_bets_lock(conn):
+            return await message.answer("❌ Экспрессы временно недоступны. Ставки заморожены админом.")
+
     await state.update_data(express_match_ids=[], express_legs=[])
     builder = InlineKeyboardBuilder()
     async with db.pool.acquire() as conn:
@@ -250,6 +261,10 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
     try:
         total_coef = 1.0
         async with db.pool.acquire() as conn:
+            if await check_bets_lock(conn):
+                await state.clear()
+                return await message.answer("❌ Ставки закрыты администратором. Экспресс отклонён.")
+
             for leg in express_legs:
                 m_id = leg['match_id']
                 b_t = leg['bet_type']
@@ -287,15 +302,14 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             )
             await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", float(final_amount), user_id)
             
-        await message.answer(f"✅ Экспресс успешно оформлен!\n📊 Количество событий: {len(express_legs)}\n🎰 Сумма: {final_amount} | Итоговый кэф: {total_coef}")
+        await message.answer(f"✅ Экспресс успешно оформлен!\n📊 Событий: {len(express_legs)}\n🎰 Сумма: {final_amount} | Итоговый кэф: {total_coef}")
         await state.clear()
     except Exception as e:
-        print(f"Ошибка сохранения экспресса: {e}")
         await message.answer(f"❌ Ошибка при регистрации экспресс-ставки: {e}")
         await state.clear()
 
 # =====================================================================
-# 4. БОНУС И МОИ СТАВКИ
+# 3. БОНУС И ИСТОРИЯ
 # =====================================================================
 
 @router.message(F.text == "🎁 Бонус")
@@ -306,10 +320,9 @@ async def get_bonus(message: Message):
             await conn.execute("UPDATE users SET balance = balance + 150.0 WHERE user_id = $1", user_id)
             new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
             
-        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +150.0\n💰 Ваш новый баланс: {new_balance:,.1f}")
+        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +150.0\n💰 Твой новый баланс: {new_balance:,.1f}")
     except Exception as e:
-        print(f"Ошибка Бонус: {e}")
-        await message.answer("❌ Произошла ошибка при получении бонуса.")
+        await message.answer(f"❌ Ошибка при получении бонуса: {e}")
 
 @router.message(F.text == "📊 Мои Ставки")
 async def my_bets(message: Message):
@@ -326,18 +339,16 @@ async def my_bets(message: Message):
             
         text = "📊 Ваши последние ставки:\n\n"
         for idx, bet in enumerate(history, 1):
-            status_emoji = "⏳" if bet['status'] == 'pending' else ("✅" if bet['status'] == 'won' else "❌")
-            
-            text += f"{idx}. {status_emoji} Одинар | Кэф: {bet['coef']} | Сумма: {bet['amount']}\n"
-            text += f"   Исход: {str(bet['outcome']).upper()} | Статус: {bet['status']}\n\n"
+            status_emoji = "⏳ В ожидании" if bet['status'] == 'pending' else ("✅ Выиграла" if bet['status'] == 'won' else "❌ Проиграла")
+            text += f"{idx}. {status_emoji} | Кэф: {bet['coef']} | Сумма: {bet['amount']}\n"
+            text += f"   Исход: {str(bet['outcome']).upper()}\n\n"
             
         await message.answer(text)
     except Exception as e:
-        print(f"Ошибка Мои Ставки: {e}")
-        await message.answer("❌ Не удалось загрузить историю ваших ставок. Сделайте первую ставку.")
+        await message.answer(f"❌ Ошибка загрузки истории: {e}")
 
 # =====================================================================
-# ПРОФИЛЬ, ТОП 10, РЕФЕРАЛКА И ПРОМОКОДЫ
+# 4. ПОЛНОСТЬЮ ПЕРЕПИСАННЫЙ РАБОЧИЙ ПРОФИЛЬ
 # =====================================================================
 
 @router.message(F.text == "👤 Профиль")
@@ -345,16 +356,38 @@ async def show_profile(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
-            user = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
-            if not user: return await message.answer("❌ Напишите /start")
-            rank = await conn.fetchval("SELECT COUNT(id) + 1 FROM users WHERE balance > (SELECT balance FROM users WHERE user_id = $1)", user_id)
+            # 1. Проверяем, зарегистрирован ли вообще юзер
+            user_data = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
+            if not user_data: 
+                return await message.answer("❌ Профиль не найден. Пожалуйста, напишите /start для регистрации.")
+                
+            balance = float(user_data['balance'])
             
-            total_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1", user_id) or 0
-            won_bets = await conn.fetchval("SELECT COUNT(id) FROM single_bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
+            # 2. Считаем позицию в топе
+            rank = await conn.fetchval("SELECT COUNT(*) + 1 FROM users WHERE balance > $1", balance)
+            
+            # 3. Безопасная статистика из новой таблицы синглов
+            total_bets = await conn.fetchval("SELECT COUNT(*) FROM single_bets WHERE user_id = $1", user_id) or 0
+            won_bets = await conn.fetchval("SELECT COUNT(*) FROM single_bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
         
-        await message.answer(f"👤 Профиль FTCL BET\n\n🆔 ID: {user_id}\n💰 Баланс: {user['balance']:,.1f}\n🎰 Всего одиночных ставок: {total_bets}\n📈 Винрейт: {winrate}%\n📊 Место в топе: #{rank}")
-    except Exception: await message.answer("❌ Ошибка профиля.")
+        profile_text = (
+            f"👤 Профиль FTCL BET\n\n"
+            f"🆔 ID: {user_id}\n"
+            f"💰 Баланс: {balance:,.1f} звёзд\n"
+            f"🎰 Одиночных ставок: {total_bets}\n"
+            f"📈 Процент побед: {winrate}%\n"
+            f"📊 Место в рейтинге: #{rank}"
+        )
+        await message.answer(profile_text)
+        
+    except Exception as e: 
+        # Выводим ошибку на экран, чтобы сразу пофиксить, если что-то упадет
+        await message.answer(f"❌ Ошибка отображения профиля: {e}")
+
+# =====================================================================
+# ДОПОЛНИТЕЛЬНОЕ
+# =====================================================================
 
 @router.message(F.text == "🏆 Топ 10")
 async def show_top_10(message: Message):
@@ -365,7 +398,7 @@ async def show_top_10(message: Message):
         for index, user in enumerate(top_users, 1):
             text += f"{index}. ID: {user['user_id']} — {user['balance']:,.1f}\n"
         await message.answer(text)
-    except Exception: await message.answer("❌ Ошибка загрузки топа.")
+    except Exception as e: await message.answer(f"❌ Ошибка топа: {e}")
 
 @router.message(F.text == "👥 Рефералка")
 async def show_referral(message: Message):
@@ -400,7 +433,7 @@ async def process_promo(message: Message, state: FSMContext):
             
             promo = await conn.fetchrow("SELECT reward, max_uses, current_uses FROM promocodes WHERE code = $1", code)
             if not promo:
-                return await message.answer("❌ Промокод не найден или указан неверно.")
+                return await message.answer("❌ Промокод не найден.")
                 
             if promo['max_uses'] <= promo['current_uses']:
                 return await message.answer("❌ Лимит активаций этого промокода исчерпан.")
@@ -416,5 +449,4 @@ async def process_promo(message: Message, state: FSMContext):
             
             await message.answer(f"✅ Промокод успешно активирован! На баланс зачислено: {reward}")
     except Exception as e:
-        print(f"Ошибка промокода: {e}")
-        await message.answer(f"❌ Ошибка при проверке промокода: {e}")
+        await message.answer(f"❌ Ошибка промокода: {e}")
