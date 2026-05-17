@@ -5,6 +5,8 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from database import db
 import json
+import random
+from datetime import datetime, timedelta
 
 router = Router()
 
@@ -139,20 +141,22 @@ async def accept_bet_amount(message: Message, state: FSMContext):
             
             coef = round(float(match_dict.get(col_name) or 2.0), 1)
 
+            # Переведено на единую таблицу bets для полной синхронизации с админкой
             await conn.execute('''
-                CREATE TABLE IF NOT EXISTS single_bets (
+                CREATE TABLE IF NOT EXISTS bets (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
-                    match_id BIGINT,
-                    outcome TEXT,
+                    match_ids BIGINT[],
+                    outcomes TEXT[],
                     amount NUMERIC,
                     coef NUMERIC,
-                    status TEXT
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
 
             await conn.execute(
-                "INSERT INTO single_bets (user_id, match_id, outcome, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+                "INSERT INTO bets (user_id, match_ids, outcomes, amount, coef, status) VALUES ($1, ARRAY[$2::BIGINT], ARRAY[$3::TEXT], $4, $5, 'pending')",
                 user_id, int(match_id), str(bet_type), float(bet_amount), float(coef)
             )
             await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", float(bet_amount), user_id)
@@ -283,22 +287,26 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
             if balance < final_amount:
                 return await message.answer("❌ Недостаточно баланса для экспресса!")
 
-            matches_json = json.dumps(express_legs)
+            # Извлечение массивов для единой таблицы bets (для поддержки админкой)
+            m_ids = [int(leg['match_id']) for leg in express_legs]
+            outcomes = [str(leg['bet_type']) for leg in express_legs]
             
             await conn.execute('''
-                CREATE TABLE IF NOT EXISTS express_bets (
+                CREATE TABLE IF NOT EXISTS bets (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
-                    matches_data TEXT,
+                    match_ids BIGINT[],
+                    outcomes TEXT[],
                     amount NUMERIC,
                     coef NUMERIC,
-                    status TEXT
+                    status TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             
             await conn.execute(
-                "INSERT INTO express_bets (user_id, matches_data, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
-                user_id, matches_json, float(final_amount), float(total_coef)
+                "INSERT INTO bets (user_id, match_ids, outcomes, amount, coef, status) VALUES ($1, $2, $3, $4, $5, 'pending')",
+                user_id, m_ids, outcomes, float(final_amount), float(total_coef)
             )
             await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", float(final_amount), user_id)
             
@@ -317,10 +325,30 @@ async def get_bonus(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET balance = balance + 150.0 WHERE user_id = $1", user_id)
+            user_data = await conn.fetchrow("SELECT last_bonus FROM users WHERE user_id = $1", user_id)
+            now = datetime.now()
+            
+            # Кулдаун ровно на 23 часа 59 минут
+            if user_data and user_data['last_bonus']:
+                time_passed = now - user_data['last_bonus']
+                cooldown = timedelta(hours=23, minutes=59)
+                
+                if time_passed < cooldown:
+                    remaining = cooldown - time_passed
+                    hours, remainder = divmod(remaining.seconds, 3600)
+                    minutes, _ = divmod(remainder, 60)
+                    return await message.answer(
+                        f"⏳ Вы уже получали бонус!\n"
+                        f"Возвращайтесь через **{hours} ч. {minutes} мин.**"
+                    )
+            
+            # Рандомная награда от 50 до 1000 звёзд
+            reward = random.randint(50, 1000)
+            
+            await conn.execute("UPDATE users SET balance = balance + $1, last_bonus = $2 WHERE user_id = $3", float(reward), now, user_id)
             new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
             
-        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +150.0\n💰 Твой новый баланс: {new_balance:,.1f}")
+        await message.answer(f"🎁 Ежедневный бонус получен!\n\nВам начислено +{reward}.0 ⭐️\n💰 Твой новый баланс: {new_balance:,.1f}")
     except Exception as e:
         await message.answer(f"❌ Ошибка при получении бонуса: {e}")
 
@@ -329,8 +357,9 @@ async def my_bets(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
+            # Читаем из единой таблицы bets
             history = await conn.fetch(
-                "SELECT match_id, outcome, amount, coef, status FROM single_bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", 
+                "SELECT match_ids, outcomes, amount, coef, status FROM bets WHERE user_id = $1 ORDER BY id DESC LIMIT 5", 
                 user_id
             )
             
@@ -341,7 +370,11 @@ async def my_bets(message: Message):
         for idx, bet in enumerate(history, 1):
             status_emoji = "⏳ В ожидании" if bet['status'] == 'pending' else ("✅ Выиграла" if bet['status'] == 'won' else "❌ Проиграла")
             text += f"{idx}. {status_emoji} | Кэф: {bet['coef']} | Сумма: {bet['amount']}\n"
-            text += f"   Исход: {str(bet['outcome']).upper()}\n\n"
+            
+            if len(bet['match_ids']) == 1:
+                text += f"   Исход: {str(bet['outcomes'][0]).upper()}\n\n"
+            else:
+                text += f"   Исход: ЭКСПРЕСС ({', '.join([str(o).upper() for o in bet['outcomes']])})\n\n"
             
         await message.answer(text)
     except Exception as e:
@@ -366,11 +399,12 @@ async def show_profile(message: Message):
             # 2. Считаем позицию в топе
             rank = await conn.fetchval("SELECT COUNT(*) + 1 FROM users WHERE balance > $1", balance)
             
-            # 3. Безопасная статистика из новой таблицы синглов
-            total_bets = await conn.fetchval("SELECT COUNT(*) FROM single_bets WHERE user_id = $1", user_id) or 0
-            won_bets = await conn.fetchval("SELECT COUNT(*) FROM single_bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
+            # 3. Статистика переведена на подсчет из единой таблицы bets
+            total_bets = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1", user_id) or 0
+            won_bets = await conn.fetchval("SELECT COUNT(*) FROM bets WHERE user_id = $1 AND status = 'won'", user_id) or 0
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
         
+        # Твой оригинальный текст сохранен полностью
         profile_text = (
             f"👤 Профиль FTCL BET\n\n"
             f"🆔 ID: {user_id}\n"
@@ -426,26 +460,29 @@ async def process_promo(message: Message, state: FSMContext):
     
     try:
         async with db.pool.acquire() as conn:
+            # Исправлена структура на использует uses_left (для 100% совпадения с админкой)
             await conn.execute('''
-                CREATE TABLE IF NOT EXISTS promocodes (code TEXT, reward NUMERIC, max_uses INT, current_uses INT DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS used_promos (user_id BIGINT, code TEXT);
+                CREATE TABLE IF NOT EXISTS promocodes (code TEXT PRIMARY KEY, reward NUMERIC, uses_left INT);
+                CREATE TABLE IF NOT EXISTS user_promos (user_id BIGINT, code TEXT);
             ''')
             
-            promo = await conn.fetchrow("SELECT reward, max_uses, current_uses FROM promocodes WHERE code = $1", code)
+            promo = await conn.fetchrow("SELECT reward, uses_left FROM promocodes WHERE code = $1", code)
             if not promo:
                 return await message.answer("❌ Промокод не найден.")
                 
-            if promo['max_uses'] <= promo['current_uses']:
+            if promo['uses_left'] <= 0:
                 return await message.answer("❌ Лимит активаций этого промокода исчерпан.")
                 
-            used = await conn.fetchval("SELECT 1 FROM used_promos WHERE user_id = $1 AND code = $2", user_id, code)
+            used = await conn.fetchval("SELECT 1 FROM user_promos WHERE user_id = $1 AND code = $2", user_id, code)
             if used:
                 return await message.answer("❌ Вы уже активировали этот промокод.")
                 
             reward = float(promo['reward'])
-            await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
-            await conn.execute("UPDATE promocodes SET current_uses = current_uses + 1 WHERE code = $1", code)
-            await conn.execute("INSERT INTO used_promos (user_id, code) VALUES ($1, $2)", user_id, code)
+            
+            async with conn.transaction():
+                await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", reward, user_id)
+                await conn.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code = $1", code)
+                await conn.execute("INSERT INTO user_promos (user_id, code) VALUES ($1, $2)", user_id, code)
             
             await message.answer(f"✅ Промокод успешно активирован! На баланс зачислено: {reward}")
     except Exception as e:
