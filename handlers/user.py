@@ -37,7 +37,7 @@ async def show_matches(message: Message):
         active_matches = await conn.fetch("SELECT id, title FROM matches WHERE status = 'active'")
     
     if not active_matches:
-        return await message.answer("🎰 На данный момент нет активных матчей.")
+        return await message.answer("🎰 На данный момент нет active матчей.")
         
     text = "Выберите матч, на который готовы поставить! 👇"
     for m in active_matches:
@@ -93,7 +93,6 @@ async def select_bet_outcome(callback: CallbackQuery, state: FSMContext):
     chosen_outcome = parts[1]
     match_id = int(parts[2])
     
-    # Переименовали переменную, чтобы не было путаницы с БД
     await state.update_data(outcome_choice=chosen_outcome, match_id=match_id)
     await callback.message.answer(f"📊 Вы выбрали исход {chosen_outcome.upper()}.\n💰 Введите сумму ставки в чат:")
     await state.set_state(BetStates.waiting_for_amount)
@@ -153,14 +152,12 @@ async def accept_bet_amount(message: Message, state: FSMContext):
                 )
             ''')
 
-            # 🔥 МАГИЯ БД: Снимаем блок и ставим дефолтное значение, чтобы база больше не крашилась
             try:
                 await conn.execute("ALTER TABLE bets ALTER COLUMN bet_type DROP NOT NULL;")
                 await conn.execute("ALTER TABLE bets ALTER COLUMN bet_type SET DEFAULT 'single';")
             except Exception:
-                pass # Если уже выполнено - пропускаем
+                pass
 
-            # Надежный инсерт через Python списки
             await conn.execute(
                 """
                 INSERT INTO bets (user_id, match_ids, outcomes, bet_type, amount, coef, status) 
@@ -322,25 +319,35 @@ async def get_bonus(message: Message):
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
-            db_now = await conn.fetchval("SELECT NOW()")
-            user_data = await conn.fetchrow("SELECT last_bonus FROM users WHERE user_id = $1", user_id)
-            
-            if user_data and user_data['last_bonus']:
-                time_passed = db_now - user_data['last_bonus']
-                cooldown = timedelta(hours=24)
+            # Бронируем строку юзера (FOR UPDATE) внутри транзакции для жесткого анти-спама
+            async with conn.transaction():
+                db_now = await conn.fetchval("SELECT NOW()")
+                if db_now.tzinfo is not None:
+                    db_now = db_now.replace(tzinfo=None) # Полное избавление от offset error
+                    
+                user_data = await conn.fetchrow("SELECT last_bonus FROM users WHERE user_id = $1 FOR UPDATE", user_id)
                 
-                if time_passed < cooldown:
-                    remaining_seconds = int((cooldown - time_passed).total_seconds())
-                    if remaining_seconds > 0:
-                        hours, remainder = divmod(remaining_seconds, 3600)
-                        minutes, _ = divmod(remainder, 60)
-                        return await message.answer(f"⏳ Возвращайтесь через **{hours} ч. {minutes} мин.**")
+                if user_data and user_data['last_bonus']:
+                    last_bonus = user_data['last_bonus']
+                    if last_bonus.tzinfo is not None:
+                        last_bonus = last_bonus.replace(tzinfo=None) # Сравниваем чистые datetime
+                        
+                    time_passed = db_now - last_bonus
+                    cooldown = timedelta(hours=24)
+                    
+                    if time_passed < cooldown:
+                        remaining_seconds = int((cooldown - time_passed).total_seconds())
+                        if remaining_seconds > 0:
+                            hours, remainder = divmod(remaining_seconds, 3600)
+                            minutes, _ = divmod(remainder, 60)
+                            return await message.answer(f"⏳ Возвращайтесь через **{hours} ч. {minutes} мин.**")
+                
+                # Выдача рандомной награды строго от 50 до 1000
+                reward = random.randint(50, 1000)
+                await conn.execute("UPDATE users SET balance = balance + $1, last_bonus = NOW() WHERE user_id = $2", float(reward), user_id)
+                new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
             
-            reward = random.randint(50, 1000)
-            await conn.execute("UPDATE users SET balance = balance + $1, last_bonus = NOW() WHERE user_id = $2", float(reward), user_id)
-            new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
-            
-        await message.answer(f"🎁 Бонус получен!\n\n+{reward}.0 ⭐️\n💰 Твой баланс: {new_balance:,.1f}")
+        await message.answer(f"🎁 Ежедневный бонус получен!\n\n+{reward}.0 ⭐️\n💰 Твой баланс: {new_balance:,.1f}")
     except Exception as e:
         await message.answer(f"❌ Ошибка при получении бонуса: {e}")
 
@@ -377,6 +384,8 @@ async def my_bets(message: Message):
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message):
     user_id = message.from_user.id
+    # Получаем юзернейм (без @) или имя пользователя
+    user_name = message.from_user.username or message.from_user.first_name
     try:
         async with db.pool.acquire() as conn:
             user_data = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
@@ -391,7 +400,7 @@ async def show_profile(message: Message):
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
         
         await message.answer(
-            f"👤 Профиль FTCL BET\n\n🆔 ID: {user_id}\n💰 Баланс: {balance:,.1f} ⭐\n"
+            f"👤 Профиль FTCL BET\n\n👤 Игрок: {user_name}\n💰 Баланс: {balance:,.1f} звёзд\n"
             f"🎰 Ставок: {total_bets}\n📈 Побед: {winrate}%\n📊 Место: #{rank}"
         )
     except Exception as e: 
@@ -402,9 +411,17 @@ async def show_top_10(message: Message):
     try:
         async with db.pool.acquire() as conn:
             top_users = await conn.fetch("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10")
+        
         text = "🏆 ТОП 10 ИГРОКОВ FTCL BET 🏆\n\n"
         for index, user in enumerate(top_users, 1):
-            text += f"{index}. ID: {user['user_id']} — {user['balance']:,.1f}\n"
+            try:
+                # Получаем данные о чате пользователя из TG для вывода юзернейма/имени
+                chat = await message.bot.get_chat(user['user_id'])
+                name = chat.username or chat.first_name
+            except Exception:
+                name = f"Игрок {user['user_id']}"
+                
+            text += f"{index}. {name} — {user['balance']:,.1f}\n"
         await message.answer(text)
     except Exception as e: 
         await message.answer(f"❌ Ошибка топа: {e}")
