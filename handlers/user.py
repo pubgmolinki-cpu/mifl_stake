@@ -3,6 +3,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.filters import Command
 from database import db
 import json
 import random
@@ -10,8 +11,11 @@ from datetime import datetime, timedelta
 
 router = Router()
 
-CHANNEL_USERNAME = "@ftclbet34"
-CHANNEL_URL = "https://t.me/ftclbet34"
+# Список обязательных каналов
+CHANNELS = [
+    {"username": "@ftclbet34", "url": "https://t.me/ftclbet34", "name": "📢 Канал 1"},
+    {"username": "@mneniefutshera", "url": "https://t.me/mneniefutshera", "name": "📢 Канал 2"}
+]
 
 class BetStates(StatesGroup):
     waiting_for_amount = State()
@@ -29,20 +33,105 @@ async def check_bets_lock(conn) -> bool:
     status = await conn.fetchval("SELECT value FROM bot_settings WHERE key = 'bets_locked'")
     return status == 'true'
 
-async def is_subscribed(bot, user_id: int) -> bool:
-    """Проверяет подписку пользователя на канал."""
+async def check_referral_reward(bot, user_id: int):
+    """Проверяет, является ли пользователь чьим-то рефералом, и выдает награду, если он подписался."""
     try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
+        async with db.pool.acquire() as conn:
+            ref = await conn.fetchrow("SELECT referrer_id FROM referrals WHERE referred_id = $1 AND status = 'pending'", user_id)
+            if ref:
+                referrer_id = ref['referrer_id']
+                
+                # Отмечаем как выполненный и начисляем баланс
+                await conn.execute("UPDATE referrals SET status = 'completed' WHERE referred_id = $1", user_id)
+                await conn.execute("UPDATE users SET balance = balance + 250 WHERE user_id = $1", referrer_id)
+                
+                # Уведомляем пригласившего
+                try:
+                    chat = await bot.get_chat(user_id)
+                    ref_name = f"@{chat.username}" if chat.username else chat.first_name
+                    await bot.send_message(
+                        referrer_id,
+                        f"Ваш друг ({ref_name}) подписался на нужные каналы ✅\nМы зачислили вам 250 ⭐"
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"Ошибка реферальной системы: {e}")
+
+async def is_subscribed(bot, user_id: int) -> bool:
+    """Проверяет подписку пользователя на все каналы."""
+    try:
+        for ch in CHANNELS:
+            member = await bot.get_chat_member(chat_id=ch["username"], user_id=user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
+        
+        # Если дошли сюда — подписан на все. Проверяем и выдаем реферальный бонус!
+        await check_referral_reward(bot, user_id)
+        return True
     except Exception:
-        # Если бот не админ или юзер не найден
         return False
 
 def sub_keyboard():
-    """Возвращает клавиатуру с кнопкой подписки."""
+    """Возвращает клавиатуру со списком каналов и кнопкой проверки."""
     builder = InlineKeyboardBuilder()
-    builder.button(text="📢 Подписаться", url=CHANNEL_URL)
+    for ch in CHANNELS:
+        builder.button(text=ch["name"], url=ch["url"])
+    builder.button(text="✅ Я подписался!", callback_data="check_sub")
+    builder.adjust(1)
     return builder.as_markup()
+
+@router.callback_query(F.data == "check_sub")
+async def process_sub_check(callback: CallbackQuery):
+    if await is_subscribed(callback.bot, callback.from_user.id):
+        await callback.message.delete()
+        await callback.message.answer("✅ Спасибо за подписку! Теперь вам доступен весь функционал бота.")
+    else:
+        await callback.answer("❌ Вы всё ещё не подписаны на все обязательные каналы!", show_alert=True)
+
+# =====================================================================
+# 0. СТАРТ И РЕФЕРАЛКА (НОВОЕ)
+# =====================================================================
+
+@router.message(Command("start"))
+async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    text_parts = message.text.split()
+    
+    async with db.pool.acquire() as conn:
+        # Создаем таблицу для рефералов, если её нет
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS referrals (
+                referred_id BIGINT PRIMARY KEY,
+                referrer_id BIGINT,
+                status TEXT
+            )
+        ''')
+        
+        # Обработка реферальной ссылки: /start <referrer_id>
+        if len(text_parts) > 1 and text_parts[1].isdigit():
+            referrer_id = int(text_parts[1])
+            if referrer_id != user_id:
+                exists = await conn.fetchval("SELECT 1 FROM referrals WHERE referred_id = $1", user_id)
+                if not exists:
+                    # Записываем как "ожидание подписки"
+                    await conn.execute("INSERT INTO referrals (referred_id, referrer_id, status) VALUES ($1, $2, 'pending')", user_id, referrer_id)
+                    
+                    ref_user = message.from_user.username
+                    ref_name = f"@{ref_user}" if ref_user else message.from_user.first_name
+                    
+                    try:
+                        await message.bot.send_message(
+                            referrer_id,
+                            f"Ваш друг ({ref_name}) перешёл по ссылке! 🔥\nЖдём когда он подпишется на обязательные каналы и сразу начислим вам 250 ⭐"
+                        )
+                    except Exception:
+                        pass
+    
+    if not await is_subscribed(message.bot, user_id):
+        await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+    else:
+        await message.answer("✅ Добро пожаловать в FTCL BET 34! Используйте меню бота для ставок.")
 
 # =====================================================================
 # 1. МАТЧИ И СТАВКИ
@@ -422,7 +511,7 @@ async def get_bonus(message: Message):
                         if remaining_seconds > 0:
                             hours, remainder = divmod(remaining_seconds, 3600)
                             minutes, _ = divmod(remainder, 60)
-                            return await message.answer(f"⏳ Возвращайтесь через {hours} ч. {minutes} мин.")
+                            return await message.answer(f"⏳ Возвращайтесь через **{hours} ч. {minutes} мин.**")
                 
                 reward = random.randint(50, 1000)
                 await conn.execute("UPDATE users SET balance = balance + $1, last_bonus = NOW() WHERE user_id = $2", float(reward), user_id)
@@ -490,7 +579,7 @@ async def show_profile(message: Message):
             winrate = int((won_bets / total_bets) * 100) if total_bets > 0 else 0
         
         await message.answer(
-            f"👤 Профиль FTCL BET\n\n👤 Игрок: {user_name}\n💰 Баланс: {balance:,.1f} звёзд\n"
+            f"👤 Профиль FTCL BET\n\n👤 Игрок: {user_name}\n💰 Баланс: {balance:,.1f} ⭐\n"
             f"🎰 Ставок: {total_bets}\n📈 Побед: {winrate}%\n📊 Место: #{rank}"
         )
     except Exception as e: 
