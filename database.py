@@ -38,9 +38,12 @@ class Database:
                         coef_tm NUMERIC,
                         coef_oz_yes NUMERIC,
                         coef_oz_no NUMERIC,
-                        status TEXT DEFAULT 'active'
+                        status TEXT DEFAULT 'active',
+                        score TEXT DEFAULT NULL
                     );
                 ''')
+                # АВТО-МИГРАЦИЯ: Добавляем колонку score для хранения результатов матчей (3:1, 0:2 и т.д.)
+                await conn.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS score TEXT DEFAULT NULL;")
 
                 # 3. Таблица промокодов
                 await conn.execute('''
@@ -60,7 +63,7 @@ class Database:
                     );
                 ''')
 
-                # 5. Таблица купонов ставок
+                # 5. Таблица купонов ставок (твоя старая структура)
                 await conn.execute('''
                     CREATE TABLE IF NOT EXISTS bets (
                         id SERIAL PRIMARY KEY,
@@ -77,6 +80,50 @@ class Database:
                 # АВТО-МИГРАЦИЯ: Добавляем колонки массивов для поддержки экспрессов в старой БД
                 await conn.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS match_ids INT[];")
                 await conn.execute("ALTER TABLE bets ADD COLUMN IF NOT EXISTS outcomes TEXT[];")
+
+                # =====================================================================
+                # НОВЫЕ ТАБЛИЦЫ ДЛЯ ПОЛНОЙ СОВМЕСТИМОСТИ С ОБНОВЛЕННЫМИ ХЕНДЛЕРАМИ
+                # =====================================================================
+
+                # 6. Таблица системных настроек (для глобальной заморозки ставок админом)
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS bot_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    );
+                ''')
+                
+                # Записываем дефолтное состояние заморозки (по умолчанию ставки открыты)
+                await conn.execute('''
+                    INSERT INTO bot_settings (key, value) 
+                    VALUES ('bets_locked', 'false') 
+                    ON CONFLICT (key) DO NOTHING;
+                ''')
+
+                # 7. Таблица одиночных ставок (single_bets) для нового обработчика
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS single_bets (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        match_id BIGINT,
+                        outcome TEXT,
+                        amount NUMERIC,
+                        coef NUMERIC,
+                        status TEXT DEFAULT 'pending'
+                    );
+                ''')
+
+                # 8. Таблица экспресс ставок (express_bets) для нового обработчика
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS express_bets (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        matches_data TEXT,
+                        amount NUMERIC,
+                        coef NUMERIC,
+                        status TEXT DEFAULT 'pending'
+                    );
+                ''')
                 
             logger.info("Все таблицы базы данных успешно проверены и обновлены.")
         except Exception as e:
