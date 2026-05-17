@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 
 router = Router()
 
+CHANNEL_USERNAME = "@ftclbet34"
+CHANNEL_URL = "https://t.me/ftclbet34"
+
 class BetStates(StatesGroup):
     waiting_for_amount = State()
 
@@ -26,18 +29,36 @@ async def check_bets_lock(conn) -> bool:
     status = await conn.fetchval("SELECT value FROM bot_settings WHERE key = 'bets_locked'")
     return status == 'true'
 
+async def is_subscribed(bot, user_id: int) -> bool:
+    """Проверяет подписку пользователя на канал."""
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception:
+        # Если бот не админ или юзер не найден
+        return False
+
+def sub_keyboard():
+    """Возвращает клавиатуру с кнопкой подписки."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📢 Подписаться", url=CHANNEL_URL)
+    return builder.as_markup()
+
 # =====================================================================
 # 1. МАТЧИ И СТАВКИ
 # =====================================================================
 
 @router.message(F.text == "📋 Матчи")
 async def show_matches(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     builder = InlineKeyboardBuilder()
     async with db.pool.acquire() as conn:
         active_matches = await conn.fetch("SELECT id, title FROM matches WHERE status = 'active'")
     
     if not active_matches:
-        return await message.answer("🎰 На данный момент нет active матчей.")
+        return await message.answer("🎰 На данный момент нет активных матчей.")
         
     text = "Выберите матч, на который готовы поставить! 👇"
     for m in active_matches:
@@ -49,6 +70,9 @@ async def show_matches(message: Message):
 
 @router.callback_query(F.data.startswith("select_match_"))
 async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
+    if not await is_subscribed(callback.bot, callback.from_user.id):
+        return await callback.message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     m_id = int(callback.data.split("_")[2])
     
     async with db.pool.acquire() as conn:
@@ -79,12 +103,15 @@ async def step_match_outcomes(callback: CallbackQuery, state: FSMContext):
     builder.button(text=f"ОЗ ({c_oz})", callback_data=f"bet_oz_{m_id}")
     
     builder.adjust(3, 3)
-    await callback.message.answer(f"📊 Выберите исход для одиночной ставки на матч {m_dict['title']}:", reply_markup=builder.as_markup())
+    await callback.message.answer(f"📊 Выберите исход для одиночной ставки на матч:\n{m_dict['title']}", reply_markup=builder.as_markup())
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("bet_"))
 async def select_bet_outcome(callback: CallbackQuery, state: FSMContext):
+    if not await is_subscribed(callback.bot, callback.from_user.id):
+        return await callback.message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     async with db.pool.acquire() as conn:
         if await check_bets_lock(conn):
             return await callback.answer("❌ Ошибка: прием ставок закрыт!", show_alert=True)
@@ -180,6 +207,9 @@ async def accept_bet_amount(message: Message, state: FSMContext):
 
 @router.message(F.text == "🚀 Экспресс")
 async def start_express(message: Message, state: FSMContext):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     async with db.pool.acquire() as conn:
         if await check_bets_lock(conn):
             return await message.answer("❌ Экспрессы недоступны. Ставки заморожены.")
@@ -202,6 +232,9 @@ async def start_express(message: Message, state: FSMContext):
 
 @router.callback_query(ExpressStates.selecting_matches, F.data.startswith("exp_toggle_"))
 async def toggle_express_match(callback: CallbackQuery, state: FSMContext):
+    if not await is_subscribed(callback.bot, callback.from_user.id):
+        return await callback.message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     match_id = int(callback.data.split("_")[2])
     data = await state.get_data()
     selected_ids = data.get("express_match_ids", [])
@@ -216,6 +249,9 @@ async def toggle_express_match(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(ExpressStates.selecting_matches, F.data == "exp_confirm_matches")
 async def confirm_matches_for_express(callback: CallbackQuery, state: FSMContext):
+    if not await is_subscribed(callback.bot, callback.from_user.id):
+        return await callback.message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     data = await state.get_data()
     selected_ids = data.get("express_match_ids", [])
     if len(selected_ids) < 2:
@@ -224,15 +260,38 @@ async def confirm_matches_for_express(callback: CallbackQuery, state: FSMContext
     await state.update_data(current_index=0)
     first_match_id = selected_ids[0]
     
+    async with db.pool.acquire() as conn:
+        match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", first_match_id)
+        
+    if not match_data:
+        return await callback.answer("❌ Матч не найден.", show_alert=True)
+        
+    m_dict = dict(match_data)
+    
+    c_p1 = round(float(m_dict.get("coef_p1") or 2.0), 1)
+    c_x = round(float(m_dict.get("coef_x") or 2.0), 1)
+    c_p2 = round(float(m_dict.get("coef_p2") or 2.0), 1)
+    c_tb = round(float(m_dict.get("coef_tb") or 2.0), 1)
+    c_tm = round(float(m_dict.get("coef_tm") or 2.0), 1)
+    c_oz = round(float(m_dict.get("coef_oz_yes") or m_dict.get("coef_oz") or 2.0), 1)
+    
     builder = InlineKeyboardBuilder()
-    for outcome in ["p1", "x", "p2", "tb2.5", "tm2.5", "oz"]:
-        builder.button(text=outcome.upper(), callback_data=f"exp_choice_{outcome}_{first_match_id}")
+    builder.button(text=f"П1 ({c_p1})", callback_data=f"exp_choice_p1_{first_match_id}")
+    builder.button(text=f"X ({c_x})", callback_data=f"exp_choice_x_{first_match_id}")
+    builder.button(text=f"П2 ({c_p2})", callback_data=f"exp_choice_p2_{first_match_id}")
+    builder.button(text=f"ТБ 2.5 ({c_tb})", callback_data=f"exp_choice_tb2.5_{first_match_id}")
+    builder.button(text=f"ТМ 2.5 ({c_tm})", callback_data=f"exp_choice_tm2.5_{first_match_id}")
+    builder.button(text=f"ОЗ ({c_oz})", callback_data=f"exp_choice_oz_{first_match_id}")
     builder.adjust(3, 3)
-    await callback.message.edit_text(f"📋 Шаг 1/{len(selected_ids)}: Выберите исход для матча ID {first_match_id}:", reply_markup=builder.as_markup())
+    
+    await callback.message.edit_text(f"📋 Шаг 1/{len(selected_ids)}: Выберите исход для матча\n{m_dict['title']}:", reply_markup=builder.as_markup())
     await state.set_state(ExpressStates.selecting_outcomes)
 
 @router.callback_query(ExpressStates.selecting_outcomes, F.data.startswith("exp_choice_"))
 async def process_express_outcome_step(callback: CallbackQuery, state: FSMContext):
+    if not await is_subscribed(callback.bot, callback.from_user.id):
+        return await callback.message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     parts = callback.data.split("_")
     outcome = parts[2]
     match_id = int(parts[3])
@@ -248,11 +307,32 @@ async def process_express_outcome_step(callback: CallbackQuery, state: FSMContex
     
     if current_index < len(selected_ids):
         next_match_id = selected_ids[current_index]
+        
+        async with db.pool.acquire() as conn:
+            match_data = await conn.fetchrow("SELECT * FROM matches WHERE id = $1", next_match_id)
+            
+        if not match_data:
+            return await callback.answer("❌ Ошибка: матч не найден.", show_alert=True)
+            
+        m_dict = dict(match_data)
+        
+        c_p1 = round(float(m_dict.get("coef_p1") or 2.0), 1)
+        c_x = round(float(m_dict.get("coef_x") or 2.0), 1)
+        c_p2 = round(float(m_dict.get("coef_p2") or 2.0), 1)
+        c_tb = round(float(m_dict.get("coef_tb") or 2.0), 1)
+        c_tm = round(float(m_dict.get("coef_tm") or 2.0), 1)
+        c_oz = round(float(m_dict.get("coef_oz_yes") or m_dict.get("coef_oz") or 2.0), 1)
+        
         builder = InlineKeyboardBuilder()
-        for outcome_type in ["p1", "x", "p2", "tb2.5", "tm2.5", "oz"]:
-            builder.button(text=outcome_type.upper(), callback_data=f"exp_choice_{outcome_type}_{next_match_id}")
+        builder.button(text=f"П1 ({c_p1})", callback_data=f"exp_choice_p1_{next_match_id}")
+        builder.button(text=f"X ({c_x})", callback_data=f"exp_choice_x_{next_match_id}")
+        builder.button(text=f"П2 ({c_p2})", callback_data=f"exp_choice_p2_{next_match_id}")
+        builder.button(text=f"ТБ 2.5 ({c_tb})", callback_data=f"exp_choice_tb2.5_{next_match_id}")
+        builder.button(text=f"ТМ 2.5 ({c_tm})", callback_data=f"exp_choice_tm2.5_{next_match_id}")
+        builder.button(text=f"ОЗ ({c_oz})", callback_data=f"exp_choice_oz_{next_match_id}")
         builder.adjust(3, 3)
-        await callback.message.edit_text(f"📋 Шаг {current_index + 1}/{len(selected_ids)}: Выберите исход для матча ID {next_match_id}:", reply_markup=builder.as_markup())
+        
+        await callback.message.edit_text(f"📋 Шаг {current_index + 1}/{len(selected_ids)}: Выберите исход для матча\n{m_dict['title']}:", reply_markup=builder.as_markup())
     else:
         await callback.message.edit_text("💰 Все исходы выбраны! Введите сумму ставки на экспресс:")
         await state.set_state(ExpressStates.waiting_for_amount)
@@ -316,21 +396,23 @@ async def accept_express_final_amount(message: Message, state: FSMContext):
 
 @router.message(F.text == "🎁 Бонус")
 async def get_bonus(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
-            # Бронируем строку юзера (FOR UPDATE) внутри транзакции для жесткого анти-спама
             async with conn.transaction():
                 db_now = await conn.fetchval("SELECT NOW()")
                 if db_now.tzinfo is not None:
-                    db_now = db_now.replace(tzinfo=None) # Полное избавление от offset error
+                    db_now = db_now.replace(tzinfo=None) 
                     
                 user_data = await conn.fetchrow("SELECT last_bonus FROM users WHERE user_id = $1 FOR UPDATE", user_id)
                 
                 if user_data and user_data['last_bonus']:
                     last_bonus = user_data['last_bonus']
                     if last_bonus.tzinfo is not None:
-                        last_bonus = last_bonus.replace(tzinfo=None) # Сравниваем чистые datetime
+                        last_bonus = last_bonus.replace(tzinfo=None) 
                         
                     time_passed = db_now - last_bonus
                     cooldown = timedelta(hours=24)
@@ -340,9 +422,8 @@ async def get_bonus(message: Message):
                         if remaining_seconds > 0:
                             hours, remainder = divmod(remaining_seconds, 3600)
                             minutes, _ = divmod(remainder, 60)
-                            return await message.answer(f"⏳ Возвращайтесь через **{hours} ч. {minutes} мин.**")
+                            return await message.answer(f"⏳ Возвращайтесь через {hours} ч. {minutes} мин.")
                 
-                # Выдача рандомной награды строго от 50 до 1000
                 reward = random.randint(50, 1000)
                 await conn.execute("UPDATE users SET balance = balance + $1, last_bonus = NOW() WHERE user_id = $2", float(reward), user_id)
                 new_balance = await conn.fetchval("SELECT balance FROM users WHERE user_id = $1", user_id)
@@ -353,6 +434,9 @@ async def get_bonus(message: Message):
 
 @router.message(F.text == "📊 Мои Ставки")
 async def my_bets(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     user_id = message.from_user.id
     try:
         async with db.pool.acquire() as conn:
@@ -367,7 +451,11 @@ async def my_bets(message: Message):
         text = "📊 Ваши последние ставки:\n\n"
         for idx, bet in enumerate(history, 1):
             status_emoji = "⏳ В ожидании" if bet['status'] == 'pending' else ("✅ Выиграла" if bet['status'] == 'won' else "❌ Проиграла")
-            text += f"{idx}. {status_emoji} | Кэф: {bet['coef']} | Сумма: {bet['amount']}\n"
+            
+            # Сокращаем коэффициент до десятых
+            formatted_coef = round(float(bet['coef']), 1)
+            
+            text += f"{idx}. {status_emoji} | Кэф: {formatted_coef} | Сумма: {bet['amount']}\n"
             if len(bet['match_ids']) == 1:
                 text += f"   Исход: {str(bet['outcomes'][0]).upper()}\n\n"
             else:
@@ -383,8 +471,10 @@ async def my_bets(message: Message):
 
 @router.message(F.text == "👤 Профиль")
 async def show_profile(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     user_id = message.from_user.id
-    # Получаем юзернейм (без @) или имя пользователя
     user_name = message.from_user.username or message.from_user.first_name
     try:
         async with db.pool.acquire() as conn:
@@ -408,6 +498,9 @@ async def show_profile(message: Message):
 
 @router.message(F.text == "🏆 Топ 10")
 async def show_top_10(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     try:
         async with db.pool.acquire() as conn:
             top_users = await conn.fetch("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10")
@@ -415,7 +508,6 @@ async def show_top_10(message: Message):
         text = "🏆 ТОП 10 ИГРОКОВ FTCL BET 🏆\n\n"
         for index, user in enumerate(top_users, 1):
             try:
-                # Получаем данные о чате пользователя из TG для вывода юзернейма/имени
                 chat = await message.bot.get_chat(user['user_id'])
                 name = chat.username or chat.first_name
             except Exception:
@@ -428,6 +520,9 @@ async def show_top_10(message: Message):
 
 @router.message(F.text == "👥 Рефералка")
 async def show_referral(message: Message):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     bot_info = await message.bot.get_me()
     await message.answer(
         "👥 Реферальная программа\n\nПолучай по 250 на баланс за друга!\n\n"
@@ -436,6 +531,9 @@ async def show_referral(message: Message):
 
 @router.message(F.text == "🎟 Промокоды")
 async def promo_start(message: Message, state: FSMContext):
+    if not await is_subscribed(message.bot, message.from_user.id):
+        return await message.answer("❌ Вы не подписаны на все каналы!", reply_markup=sub_keyboard())
+
     await message.answer("🎟 Отправьте промокод в чат:")
     await state.set_state(PromoStates.waiting_for_code)
 
