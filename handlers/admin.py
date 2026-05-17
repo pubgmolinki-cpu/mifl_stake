@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -45,22 +46,42 @@ def parse_team_form(scores_str: str) -> dict:
 # АДМИН-ПАНЕЛЬ
 # ==========================================
 @router.message(Command("admin"))
+@router.message(F.text == "⚙️ Админ-панель")
 async def admin_panel(message: types.Message):
     if message.from_user.id not in ADMIN_IDS: return
 
     kb = [
         [types.KeyboardButton(text="➕ Авто-матч"), types.KeyboardButton(text="🎟 Создать Промокод")],
-        [types.KeyboardButton(text="🏁 Завершить матч"), types.KeyboardButton(text="📋 Список активных матчей")]
+        [types.KeyboardButton(text="🏁 Завершить матч"), types.KeyboardButton(text="📋 Список активных матчей")],
+        [types.KeyboardButton(text="🔒 Закрыть ставки"), types.KeyboardButton(text="🔓 Открыть ставки")]
     ]
     keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
     await message.answer(
-        "🛠 Панель администратора\n\n"
+        "🛠 **Панель администратора FTCL**\n\n"
         "• Кнопка Авто-матч — Сгенерировать матч по форме\n"
         "• Кнопка Создать Промокод — Выпустить код на звёзды\n"
         "• Кнопка Завершить матч — Расчет ставок по счету\n"
-        "• Команда /give_balance ID СУММА — Начислить баланс игроку",
+        "• Кнопки Блокировки — Ручное управление приемом ставок\n"
+        "• Команда `/give_balance ID СУММА` — Начислить баланс игроку",
         reply_markup=keyboard
     )
+
+# ==========================================
+# УПРАВЛЕНИЕ БЛОКИРОВКОЙ СТАВОК
+# ==========================================
+@router.message(F.text == "🔒 Закрыть ставки")
+async def lock_bets_manually(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE bot_settings SET value = 'true' WHERE key = 'bets_locked'")
+    await message.answer("🔒 Ставки успешно ЗАМОРОЖЕНЫ. Пользователи не могут отправлять новые купоны.")
+
+@router.message(F.text == "🔓 Открыть ставки")
+async def unlock_bets_manually(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE bot_settings SET value = 'false' WHERE key = 'bets_locked'")
+    await message.answer("🔓 Ставки успешно ОТКРЫТЫ для приема прогнозов.")
 
 # ==========================================
 # АВТОГЕНЕРАЦИЯ МАТЧА
@@ -69,7 +90,7 @@ async def admin_panel(message: types.Message):
 @router.message(F.text == "➕ Авто-матч")
 async def start_auto_match(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer("⚽️ Автогенерация матча\n\nВведите НАЗВАНИЕ 1-й команды и 3 счета.\nПример: Рапид, 2:1 1:1 3:0")
+    await message.answer("⚽️ **Автогенерация матча**\n\nВведите НАЗВАНИЕ 1-й команды и 3 счета.\nПример: `Рапид, 2:1 1:1 3:0`")
     await state.set_state(AutoMatchStates.team1_data)
 
 @router.message(AutoMatchStates.team1_data)
@@ -124,7 +145,7 @@ async def process_team2(message: types.Message, state: FSMContext):
         )
 
     await message.answer(
-        f"🎉 Матч опубликован!\n\n🏆 {match_title}\n"
+        f"🎉 **Матч опубликован!**\n\n🏆 {match_title}\n"
         f"• П1: {coef_p1} | Х: {coef_x} | П2: {coef_p2}\n"
         f"• ТБ(2.5): {coef_tb} | ТМ(2.5): {coef_tm}\n"
         f"• ОЗ(Да): {coef_oz_yes} | ОЗ(Нет): {coef_oz_no}"
@@ -132,12 +153,12 @@ async def process_team2(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ==========================================
-# АДМИНМАРКЕР: СОЗДАНИЕ ПРОМОКОДОВ
+# СОЗДАНИЕ ПРОМОКОДОВ
 # ==========================================
 @router.message(F.text == "🎟 Создать Промокод")
 async def admin_start_promo(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer("🎟 Конструктор Промокодов\n\nОтправьте данные промокода в формате:\nКОД, СУММА, КОЛИЧЕСТВО\n\nПример: `FTCL500, 500, 50` (код FTCL500 на 500 звёзд для 50 игроков)")
+    await message.answer("🎟 **Конструктор Промокодов**\n\nОтправьте данные промокода в формате:\n`КОД, СУММА, КОЛИЧЕСТВО`\n\nПример: `FTCL500, 500, 50`")
     await state.set_state(PromoCreateStates.waiting_for_data)
 
 @router.message(PromoCreateStates.waiting_for_data)
@@ -170,8 +191,8 @@ async def start_settle_match(message: types.Message, state: FSMContext):
     if not active_matches:
         return await message.answer("ℹ️ Нет активных матчей для расчета.")
 
-    text = "🔎 Выберите ID матча для закрытия:\n\n"
-    for m in active_matches: text += f"• ID: {m['id']} — {m['title']}\n"
+    text = "🔎 **Выберите ID матча для закрытия:**\n\n"
+    for m in active_matches: text += f"• ID: `{m['id']}` — {m['title']}\n"
     await message.answer(text)
     await state.set_state(SettleMatchStates.match_id)
 
@@ -179,21 +200,28 @@ async def start_settle_match(message: types.Message, state: FSMContext):
 async def process_settle_id(message: types.Message, state: FSMContext):
     if not message.text.isdigit(): return await message.answer("❌ ID должен быть числом!")
     await state.update_data(match_id=int(message.text))
-    await message.answer("⚽️ Введите финальный счет матча (например 2:0):")
+    await message.answer("⚽️ Введите финальный счет матча (например `2:0`, `1-1` или `3 2`):")
     await state.set_state(SettleMatchStates.score)
 
 @router.message(SettleMatchStates.score)
 async def process_settle_score(message: types.Message, state: FSMContext):
-    if ":" not in message.text: return await message.answer("❌ Формат счета через двоеточие!")
+    raw_score = message.text.strip()
+    
+    # Автоматическое исправление неверной пунктуации (замена дефисов, пробелов, запятых на двоеточие)
+    clean_score = re.sub(r"[- ,._]", ":", raw_score)
+    
+    if not re.match(r"^\d+:\d+$", clean_score):
+        return await message.answer("❌ Неверный формат счета! Введите данные по шаблону `Число:Число` (например, 2:0).")
+        
     data = await state.get_data()
-    m_id, score_str = data['match_id'], message.text.strip()
+    m_id = data['match_id']
     
     try:
-        g1, g2 = map(int, score_str.split(":"))
+        g1, g2 = map(int, clean_score.split(":"))
     except ValueError:
-        return await message.answer("❌ Неверный формат счета! Введите числа, например 2:0")
+        return await message.answer("❌ Ошибка обработки чисел счета. Попробуйте снова.")
 
-    # Формируем список выигрышных исходов (с поддержкой разных версий кнопок)
+    # Формируем список выигрышных исходов
     winning = []
     winning.append("p1" if g1 > g2 else "x" if g1 == g2 else "p2")
     
@@ -211,9 +239,10 @@ async def process_settle_score(message: types.Message, state: FSMContext):
         match_info = await conn.fetchrow("SELECT title FROM matches WHERE id = $1", m_id)
         if not match_info: return await message.answer("❌ Матч не найден.")
 
-        await conn.execute("UPDATE matches SET status = 'finished' WHERE id = $1", m_id)
+        # Обновляем статус матча и записываем точный счет в БД
+        await conn.execute("UPDATE matches SET status = 'finished', score = $1 WHERE id = $2", clean_score, m_id)
         
-        # Берем купоны, где фигурирует этот матч
+        # Берем купоны из таблицы купонов кумулятивно (где фигурирует этот матч)
         bets = await conn.fetch("SELECT * FROM bets WHERE status = 'pending' AND $1 = ANY(match_ids)", m_id)
 
         count = 0
@@ -227,7 +256,11 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                     win_sum = b['amount'] * b['coef']
                     await conn.execute("UPDATE bets SET status = 'won' WHERE id = $1", b['id'])
                     await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", win_sum, b['user_id'])
-                    try: await message.bot.send_message(b['user_id'], f"🟢 Ставка №{b['id']} выиграла!\nМатч: {match_info['title']} ({score_str})\n💰 +{round(win_sum, 1)} ⭐️")
+                    try: 
+                        await message.bot.send_message(
+                            b['user_id'], 
+                            f"🟢 Ставка №{b['id']} выиграла!\nМатч: {match_info['title']} ({clean_score})\n💰 +{round(win_sum, 1)} ⭐️"
+                        )
                     except Exception: pass
                 else:
                     # Экспресс. Проверяем, все ли остальные матчи в нем сыграли
@@ -241,35 +274,63 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                         win_sum = b['amount'] * b['coef']
                         await conn.execute("UPDATE bets SET status = 'won' WHERE id = $1", b['id'])
                         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", win_sum, b['user_id'])
-                        try: await message.bot.send_message(b['user_id'], f"🟢 Экспресс №{b['id']} выиграла!\n💰 +{round(win_sum, 1)} ⭐️")
+                        try: 
+                            await message.bot.send_message(
+                                b['user_id'], 
+                                f"🎉 Поздравляем! Ваш Экспресс №{b['id']} полностью СЫГРАЛ!\n💰 +{round(win_sum, 1)} ⭐️"
+                            )
                         except Exception: pass
             else:
                 # Если хоть один исход не угадан — купон сразу проиграл
                 await conn.execute("UPDATE bets SET status = 'lost' WHERE id = $1", b['id'])
-                try: await message.bot.send_message(b['user_id'], f"🔴 Ставка №{b['id']} проиграла.\nМатч: {match_info['title']} ({score_str})")
+                try: 
+                    await message.bot.send_message(
+                        b['user_id'], 
+                        f"🔴 Ставка №{b['id']} проиграла.\nМатч: {match_info['title']} ({clean_score})"
+                    )
                 except Exception: pass
             count += 1
 
-    await message.answer(f"🏁 Матч {match_info['title']} закрыт ({score_str}). Рассчитано купонов: {count}.")
+        # --- АВТОМАТИЧЕСКАЯ РАЗМОРОЗКА СИСТЕМЫ СТАВОК ---
+        remaining_active = await conn.fetchval("SELECT COUNT(*) FROM matches WHERE status = 'active'")
+        if remaining_active == 0:
+            await conn.execute("UPDATE bot_settings SET value = 'false' WHERE key = 'bets_locked'")
+            await message.answer(
+                f"🏁 Матч {match_info['title']} успешно закрыт со счетом {clean_score}.\n"
+                f"🎰 Рассчитано купонов: {count}.\n"
+                f"🔄 Все текущие матчи закрыты! Прием новых ставок автоматически **РАЗМОРОЖЕН**."
+            )
+        else:
+            await message.answer(
+                f"🏁 Матч {match_info['title']} успешно закрыт со счетом {clean_score}.\n"
+                f"🎰 Рассчитано купонов: {count}.\n"
+                f"⏳ До автоматического открытия ставок осталось внести результаты еще для {remaining_active} матчей."
+            )
+            
     await state.clear()
 
+@router.message(F.text == "📋 Список active матчей")
 @router.message(F.text == "📋 Список активных матчей")
 async def list_active_matches(message: types.Message):
     if message.from_user.id not in ADMIN_IDS: return
     async with db.pool.acquire() as conn:
         matches = await conn.fetch("SELECT id, title FROM matches WHERE status = 'active'")
-    if not matches: return await message.answer("Матчей нет.")
-    text = "🎰 Активные матчи:\n\n"
-    for m in matches: text += f"• ID: {m['id']} — {m['title']}\n"
+    if not matches: return await message.answer("🎰 Активных матчей в данный момент нет.")
+    text = "🎰 **Активные матчи:**\n\n"
+    for m in matches: text += f"• ID: `{m['id']}` — {m['title']}\n"
     await message.answer(text)
 
 @router.message(Command("give_balance"))
 async def give_balance_cmd(message: types.Message):
     if message.from_user.id not in ADMIN_IDS: return
     args = message.text.split()
-    if len(args) < 3: return await message.answer("❌ Формат: /give_balance [ID] [Сумма]")
+    if len(args) < 3: return await message.answer("❌ Формат команды: `/give_balance [ID] [Сумма]`")
     
-    target, amount = int(args[1]), float(args[2])
+    try:
+        target, amount = int(args[1]), float(args[2])
+    except ValueError:
+        return await message.answer("❌ Ошибка парсинга аргументов. ID и Сумма должны быть числами.")
+        
     async with db.pool.acquire() as conn:
         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, target)
-    await message.answer(f"💰 Выдано +{amount} игроку {target}.")
+    await message.answer(f"💰 Успешно выдано +{amount} ⭐️ игроку с ID `{target}`.")
