@@ -3,12 +3,19 @@ import logging
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.fsm.storage.memory import MemoryStorage  # Добавлено для стабильной работы FSM в админке
 from database import db
 from handlers import user, admin
 from aiohttp import web
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
+# =====================================================================
+# ВЕБ-СЕРВЕР ДЛЯ РАБОТЫ НА RENDER (HEALTH CHECK)
+# =====================================================================
 async def handle_health_check(request):
     return web.Response(text="Бот FTCL BET успешно работает!", status=200)
 
@@ -22,13 +29,20 @@ async def start_render_port_listener():
     await site.start()
     logging.info(f"Слушатель порта для Render запущен на 0.0.0.0:{port}")
 
+# =====================================================================
+# ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА БОТА
+# =====================================================================
 async def main():
+    # Подключаемся к базе данных PostgreSQL (с авто-миграциями таблиц)
     await db.connect()
 
     bot_token = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН_БОТА_СЮДА")
     bot = Bot(token=bot_token)
-    dp = Dispatcher()
+    
+    # Инициализируем диспетчер с явным указанием оперативной памяти для хранения FSM-состояний
+    dp = Dispatcher(storage=MemoryStorage())
 
+    # Включаем роутеры (админский первым, чтобы перехватывать его текстовые кнопки)
     dp.include_router(admin.router)
     dp.include_router(user.router)
 
@@ -61,7 +75,7 @@ async def main():
                         except Exception:
                             pass
 
-        # Главное меню
+        # Главное меню обычного пользователя
         kb = [
             [types.KeyboardButton(text="📋 Матчи"), types.KeyboardButton(text="🚀 Экспресс")],
             [types.KeyboardButton(text="👤 Профиль"), types.KeyboardButton(text="🏆 Топ 10"), types.KeyboardButton(text="👥 Рефералка")],
@@ -74,11 +88,17 @@ async def main():
             reply_markup=keyboard
         )
 
+    # Запускаем фоновую задачу прослушивания порта для Render
     asyncio.create_task(start_render_port_listener())
+    
+    # Очищаем очередь старых апдейтов, чтобы бот не отвечал на спам во время отключения
     await bot.delete_webhook(drop_pending_updates=True)
     
     logging.info("Бот запущен в режиме Long Polling!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот успешно остановлен.")
