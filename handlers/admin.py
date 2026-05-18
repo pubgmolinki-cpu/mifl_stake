@@ -7,6 +7,9 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.filters import Command
 from database import db
 
+# Импортируем функцию начисления 5% из твоего файла user.py
+from user import award_referral_percent
+
 router = Router()
 logger = logging.getLogger(__name__)
 
@@ -156,7 +159,7 @@ async def admin_save_promo(message: types.Message, state: FSMContext):
     await state.clear()
 
 # ==========================================
-# ИСПРАВЛЕННЫЙ РАСЧЕТ СТАВОК
+# ИСПРАВЛЕННЫЙ РАСЧЕТ СТАВОК (С НАЧИСЛЕНИЕМ 5%)
 # ==========================================
 @router.message(F.text == "🏁 Завершить матч")
 async def start_settle_match(message: types.Message, state: FSMContext):
@@ -217,6 +220,10 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                     win_sum = b['amount'] * b['coef']
                     await conn.execute("UPDATE bets SET status = 'won' WHERE id = $1", b['id'])
                     await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", win_sum, b['user_id'])
+                    
+                    # НАЧИСЛЕНИЕ 5% РЕФОВОДУ ЗА ОДИНОЧНУЮ СТАВКУ
+                    await award_referral_percent(message.bot, b['user_id'], win_sum)
+                    
                     try: await message.bot.send_message(b['user_id'], f"🟢 Ставка №{b['id']} выиграла!\nМатч: {match_info['title']} ({clean_score})\n💰 +{round(win_sum, 1)} ⭐️")
                     except Exception: pass
                 else:
@@ -229,6 +236,10 @@ async def process_settle_score(message: types.Message, state: FSMContext):
                         win_sum = b['amount'] * b['coef']
                         await conn.execute("UPDATE bets SET status = 'won' WHERE id = $1", b['id'])
                         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", win_sum, b['user_id'])
+                        
+                        # НАЧИСЛЕНИЕ 5% РЕФОВОДУ ЗА ЭКСПРЕСС
+                        await award_referral_percent(message.bot, b['user_id'], win_sum)
+                        
                         try: await message.bot.send_message(b['user_id'], f"🎉 Экспресс №{b['id']} СЫГРАЛ!\n💰 +{round(win_sum, 1)} ⭐️")
                         except Exception: pass
             else:
