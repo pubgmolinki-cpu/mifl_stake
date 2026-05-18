@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from database import db
 
 # Импортируем функцию начисления 5% из твоего файла user.py
-from user import award_referral_percent
+from .user import award_referral_percent
 
 router = Router()
 logger = logging.getLogger(__name__)
